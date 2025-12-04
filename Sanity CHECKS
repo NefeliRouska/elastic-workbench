@@ -1,0 +1,42 @@
+import pandas as pd, networkx as nx, re, collections
+
+edges = pd.read_csv("bn_edges.csv")
+rawG = nx.DiGraph(); rawG.add_edges_from(edges.values)
+
+def pretty_metric(s):
+    s = re.split(r'__', s)[0].strip('_')
+    s = s.replace("container_", "").replace("_total","").replace("_"," ").title()
+    return {"Buffer_size":"Buffer Size",
+            "Avg P Latency":"Average Processing Latency",
+            "Throughput":"Throughput"}.get(s, s)
+
+# 1) How many raw nodes merged into each pretty label?
+label_count = collections.Counter(pretty_metric(n) for n in rawG.nodes())
+print("Merged counts (label → #raw nodes):")
+for lbl, k in label_count.most_common():
+    if k > 1:
+        print(f"  {lbl}: {k}")   # e.g., 'Throughput: 3' means 3 raw nodes merged
+
+# 2) Is the raw BN a DAG?
+print("Raw BN is DAG:", nx.is_directed_acyclic_graph(rawG))
+
+# 3) Build merged graph with edge weights = how many raw edges collapsed into each
+merged = nx.DiGraph()
+for u,v in rawG.edges():
+    U, V = pretty_metric(u), pretty_metric(v)
+    merged.add_edge(U, V, weight=merged.get_edge_data(U,V,default={'weight':0})['weight'] + 1)
+
+print("Merged nodes:", len(merged.nodes()), "Merged edges:", len(merged.edges()))
+
+
+
+# Average Processing Latency: 3
+# Throughput: 3
+# Python Gc Collections: 3
+# Buffer Size: 2
+# Python Gc Objects Collected: 2
+# Raw BN is DAG: True
+# Merged nodes: 41 Merged edges: 42
+
+
+

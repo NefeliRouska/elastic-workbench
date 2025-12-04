@@ -1,0 +1,64 @@
+{
+  "clientSLOs": [
+    {
+      "client_id": "C_1",
+      "service_type": "elastic-workbench-qr-detector",
+      "SLOs": [
+        {
+          "var": "data_quality",
+          "larger": true,
+          "target": 800,
+          "weight": 0.5
+        },
+        {
+          "var": "completion_rate",
+          "larger": true,
+          "target": 1,
+          "weight": 1.0
+        }
+      ]
+    },
+    {
+      "client_id": "C_1",
+      "service_type": "elastic-workbench-cv-analyzer",
+      "SLOs": [
+        {
+          "var": "data_quality",
+          "larger": true,
+          "target": 288,
+          "weight": 0.2
+        },
+        {
+          "var": "model_size",
+          "larger": true,
+          "target": 3,
+          "weight": 0.2
+        },
+        {
+          "var": "completion_rate",
+          "larger": true,
+          "target": 1,
+          "weight": 1.0
+        }
+      ]
+    },
+    {
+      "client_id": "C_1",
+      "service_type": "elastic-workbench-pc-visualizer",
+      "SLOs": [
+        {
+          "var": "data_quality",
+          "larger": true,
+          "target": 40,
+          "weight": 0.5
+        },
+        {
+          "var": "completion_rate",
+          "larger": true,
+          "target": 1,
+          "weight": 1.0
+        }
+      ]
+    }
+  ]
+}

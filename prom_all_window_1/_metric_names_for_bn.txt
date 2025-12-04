@@ -1,0 +1,5 @@
+avg_p_latency
+throughput
+buffer_size
+cores
+s_config_data_quality
