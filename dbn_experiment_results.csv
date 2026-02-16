@@ -1,0 +1,19 @@
+fs,disc,score,accuracy,mean_prob_true,n_features_including_target,features,error
+markov,classic(uniform),bic,0.44,0.3682690091478155,3.0,"['data_quality', 'cores', 'throughput']",
+markov,kmeans,bic,0.44,0.36809752068728985,3.0,"['data_quality', 'cores', 'throughput']",
+pca,classic(uniform),bic,0.188,0.3472023560059885,13.0,"['pca_1', 'pca_2', 'pca_3', 'pca_4', 'pca_5', 'pca_6', 'pca_7', 'pca_8', 'pca_9', 'pca_10', 'pca_11', 'pca_12', 'throughput']",
+mrmr,classic(uniform),bic,0.168,0.1706475530434438,13.0,"['container_fs_usage_bytes', 'container_fs_reads_bytes_total', 'avg_p_latency', 'machine_scrape_error', 'container_memory_cache', 'container_cpu_cfs_throttled_seconds_total', 'data_quality', 'container_memory_max_usage_bytes', 'container_cpu_user_seconds_total', 'container_memory_mapped_file', 'container_fs_read_seconds_total', 'container_last_seen', 'throughput']",
+mrmr,kmeans,bic,0.168,0.12576548416288333,13.0,"['container_fs_usage_bytes', 'container_fs_reads_bytes_total', 'avg_p_latency', 'machine_scrape_error', 'container_memory_cache', 'container_cpu_cfs_throttled_seconds_total', 'data_quality', 'container_memory_max_usage_bytes', 'container_cpu_user_seconds_total', 'container_memory_mapped_file', 'container_fs_read_seconds_total', 'container_last_seen', 'throughput']",
+pca,kmeans,bic,0.088,0.2931601243583336,13.0,"['pca_1', 'pca_2', 'pca_3', 'pca_4', 'pca_5', 'pca_6', 'pca_7', 'pca_8', 'pca_9', 'pca_10', 'pca_11', 'pca_12', 'throughput']",
+mrmr,dbscan,bic,0.0,0.02987277521632656,13.0,"['container_fs_usage_bytes', 'container_fs_reads_bytes_total', 'avg_p_latency', 'machine_scrape_error', 'container_memory_cache', 'container_cpu_cfs_throttled_seconds_total', 'data_quality', 'container_memory_max_usage_bytes', 'container_cpu_user_seconds_total', 'container_memory_mapped_file', 'container_fs_read_seconds_total', 'container_last_seen', 'throughput']",
+markov,dbscan,bic,0.0,0.029459059610466267,3.0,"['data_quality', 'cores', 'throughput']",
+markov,classic(uniform),aic,,,,,Base scorer has to be of type StructureScore.
+markov,kmeans,aic,,,,,Base scorer has to be of type StructureScore.
+markov,dbscan,aic,,,,,Base scorer has to be of type StructureScore.
+mrmr,classic(uniform),aic,,,,,Base scorer has to be of type StructureScore.
+mrmr,kmeans,aic,,,,,Base scorer has to be of type StructureScore.
+mrmr,dbscan,aic,,,,,Base scorer has to be of type StructureScore.
+pca,classic(uniform),aic,,,,,Base scorer has to be of type StructureScore.
+pca,kmeans,aic,,,,,Base scorer has to be of type StructureScore.
+pca,dbscan,bic,,,,,The node throughput_t1 is not in the digraph.
+pca,dbscan,aic,,,,,Base scorer has to be of type StructureScore.
