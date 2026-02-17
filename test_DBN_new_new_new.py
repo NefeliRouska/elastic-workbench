@@ -11,7 +11,8 @@ from pgmpy.inference import VariableElimination
 
 # IMPORTANT: change this import to your actual create_dbn filename/module
 # from full_dynamic_bn_learn_final_new_new import build_dbn_model_2s
-from full_dynamic_bn_new_new_new import build_dbn_model_2s  # example: if your file is create_dbn.py
+from full_dynamic_bn_new_new_new import build_dbn_model_2s 
+
 
 
 # ============================================================
@@ -22,7 +23,8 @@ TRAIN_FRAC = 0.8
 TARGET = "throughput"
 
 # Sweep K (number of predictor features; TARGET is always included)
-K_VALUES = [3, 5, 8, 10, 12, 15, 20]
+#K_VALUES = [3, 5, 8, 10, 12, 15, 20]
+K_VALUES = [3, 5]
 
 # Methods
 FEATURE_SELECTION_METHODS = ["markov", "mrmr", "pca"]
@@ -59,7 +61,7 @@ EVIDENCE_SUBSET = ["avg_p_latency", "cores", "data_quality", "buffer_size"]
 def load_and_clean(path):
     df = pd.read_csv(path)
 
-    if "s_config" in df.columns:
+    if "s_config" in df.columns: #Some columns contain string dictionaries. This converts them into real columns.
         def parse(val):
             try:
                 d = ast.literal_eval(val)
@@ -73,7 +75,7 @@ def load_and_clean(path):
 
     # drop timestamp-like columns
     for col in list(df.columns):
-        if "time" in col.lower():
+        if "time" in col.lower(): #Time indices should not be treated as variables.
             df.drop(columns=[col], inplace=True)
 
     df = df.apply(pd.to_numeric, errors="ignore")
@@ -88,7 +90,7 @@ def load_and_clean(path):
     return df
 
 # ============================================================
-# DISCRETIZATION
+# DISCRETIZATION / This converts continuous features into discrete states. Bayesian networks operate on discrete probability tables.
 # ============================================================
 class Discretizer:
     """
@@ -115,7 +117,7 @@ class Discretizer:
         if self.method not in valid:
             raise ValueError(f"Unknown discretizer method: {self.method}")
 
-    def fit(self, df):
+    def fit(self, df): #Learns bin boundaries from TRAIN ONLY.
         self.columns_ = list(df.columns)
 
         if self.method in {"classic_uniform", "classic_quantile", "kmeans"}:
@@ -127,11 +129,14 @@ class Discretizer:
                 strategy = "kmeans"
 
             for c in self.columns_:
-                kbd = KBinsDiscretizer(n_bins=self.n_bins, encode="ordinal", strategy=strategy)
+                kbd = KBinsDiscretizer(n_bins=self.n_bins, encode="ordinal", strategy=strategy) #For each column, create and fit a discretizer, encode="ordinal" makes bins become integers 0..(n_bins-1).
                 kbd.fit(df[[c]])
                 self.kbins[c] = kbd
 
         else:  # dbscan
+            #DBSCAN groups together values that are close in numeric distance. 
+            # Two points are considered “connected” if they can be linked by a chain of points within eps distance. 
+            # A cluster exists if at least min_samples points form a dense region.
             for c in self.columns_:
                 x = df[c].to_numpy(dtype=float).reshape(-1, 1)
                 db = DBSCAN(eps=self.dbscan_eps, min_samples=self.dbscan_min_samples)
@@ -142,14 +147,15 @@ class Discretizer:
                     # all noise -> single center
                     self.dbscan_centers[c] = np.array([float(np.mean(x))])
                     continue
-
+                
+                #For each cluster label lab, you compute the cluster center = mean of points in that cluster. Sort centers and store them.
                 centers = []
                 for lab in uniq:
                     centers.append(float(np.mean(x[labels == lab])))
                 centers = np.sort(np.array(centers))
                 self.dbscan_centers[c] = centers
 
-    def transform(self, df):
+    def transform(self, df): #Applies same bins to test data.
         if self.columns_ is None:
             raise RuntimeError("Discretizer must be fitted before transform.")
 
@@ -161,6 +167,8 @@ class Discretizer:
             return out.astype(int)
 
         # DBSCAN: deterministic nearest-center assignment (no new clusters at test time)
+        # 1. compute its absolute distance to every stored center 2. pick the closest center 3. assign the index of that center as the discrete label
+        # So discrete state for feature c is: 0 if closest to smallest center, 1 if closest to second center etc
         for c in self.columns_:
             centers = self.dbscan_centers[c]
             x = out[c].to_numpy(dtype=float).reshape(-1, 1)
@@ -173,13 +181,13 @@ class Discretizer:
 # ============================================================
 # FEATURE SELECTION HELPERS
 # ============================================================
-def _split_X_y(df):
+def _split_X_y(df): #Splits dataframe into predictors X and target y.
     X = df.drop(columns=[TARGET])
     y = df[TARGET]
     return X, y
 
 
-def _top_k_by_mi(train_df, k):
+def _top_k_by_mi(train_df, k): #Returns the top-k predictors by mutual information with target.
     X, y = _split_X_y(train_df)
     mi = mutual_info_regression(X.to_numpy(), y.to_numpy(), random_state=0)
     order = np.argsort(mi)[::-1]
@@ -358,7 +366,7 @@ def apply_feature_selection(train_raw, test_raw, fs_method, k, score_name):
 
 
 # ============================================================
-# EVALUATION (your original logic, clarified)
+# EVALUATION
 # ============================================================
 def evaluate(model_2s, test_df):
     test_df = test_df.reset_index(drop=True)
@@ -434,6 +442,14 @@ def run_one(raw_df, fs_method, disc_method, score_name, k):
     # Safety checks (prevents the PCA+DBSCAN "throughput missing" issue)
     if TARGET not in train_ready.columns or TARGET not in test_ready.columns:
         raise RuntimeError(f"TARGET missing after FS={fs_method} DISC={disc_method} K={k}")
+
+    if TARGET not in train_ready.columns:
+        raise RuntimeError("TARGET missing in train_ready before DBN training (should not happen).")
+
+# Debug-only (temporarily)
+    print("TRAIN_READY COLS:", train_ready.columns.tolist())
+    print("TRAIN_READY LEN:", len(train_ready))
+
 
     # DBN training (calls your create_dbn file)
     model_2s, *_ = build_dbn_model_2s(train_ready, score_name=score_name)
