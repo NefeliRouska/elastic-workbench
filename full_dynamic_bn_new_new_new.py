@@ -6,13 +6,13 @@ from pgmpy.models import BayesianNetwork
 
 
 # ----------------------------
-# CONFIG DEFAULTS (same as yours)
+# CONFIG DEFAULTS
 # ----------------------------
-MAX_INDEGREE = 4
-HC_MAX_ITER = 25000
-HC_TABU_LENGTH = 100
-HC_EPSILON = 1e-4
-HC_USE_CACHE = True
+MAX_INDEGREE = 4 #no node can have more than 4 parents.
+HC_MAX_ITER = 25000 #the hill-climb search can take up to 25,000 steps (moves)
+HC_TABU_LENGTH = 100 #hill-climb uses a tabu list (memory of recent moves) to reduce cycling and local traps.
+HC_EPSILON = 1e-4 #stopping threshold: if improvements are smaller than this, search can stop
+HC_USE_CACHE = True #caches score computations to speed up repeated evaluations
 
 
 # ----------------------------
@@ -23,8 +23,6 @@ class AicScoreCustom(StructureScore):
     """
     Discrete AIC score: maximize LL - k
     Equivalent to minimizing AIC = -2LL + 2k.
-
-    Works with discrete integer-coded data.
     """
 
     def __init__(self, data):
@@ -33,7 +31,7 @@ class AicScoreCustom(StructureScore):
         self.state_names = {c: sorted(data[c].unique()) for c in data.columns}
         self.card = {c: len(self.state_names[c]) for c in data.columns}
 
-    def local_score(self, variable, parents):
+    def local_score(self, variable, parents): #Structure scoring in pgmpy is “decomposable”: the total score of a graph can be computed as a sum of local scores per node
         df = self.data
         r_i = self.card[variable]
 
@@ -45,13 +43,13 @@ class AicScoreCustom(StructureScore):
                 p = counts / total if total > 0 else np.zeros_like(counts, dtype=float)
                 ll = np.nansum(counts * np.log(p, where=(p > 0)))
 
-            k = (r_i - 1) * 1
+            k = (r_i - 1) * 1 #r_i is number of states of the variable
             return float(ll - k)
 
         group_cols = list(parents) + [variable]
         ct = df.groupby(group_cols).size().reset_index(name="n")
-        pa_counts = ct.groupby(list(parents))["n"].sum().reset_index(name="n_pa")
-        merged = ct.merge(pa_counts, on=list(parents), how="left")
+        pa_counts = ct.groupby(list(parents))["n"].sum().reset_index(name="n_pa") #for each parent configuration, count how many samples have that parent configuration
+        merged = ct.merge(pa_counts, on=list(parents), how="left") #adds the parent totals n_pa back to each row where we have specific (parents, variable)
 
         n = merged["n"].to_numpy(dtype=float)
         n_pa = merged["n_pa"].to_numpy(dtype=float)
@@ -60,15 +58,15 @@ class AicScoreCustom(StructureScore):
             frac = n / n_pa
             ll = np.nansum(n * np.log(frac, where=(frac > 0)))
 
-        q_i = 1
+        q_i = 1 #number of possible parent configurations
         for p in parents:
-            q_i *= self.card[p]
+            q_i *= self.card[p] #product of cardinalities of each parent.
 
         k = (r_i - 1) * q_i
         return float(ll - k)
 
 
-def make_score(score_name: str, df: pd.DataFrame):
+def make_score(score_name: str, df: pd.DataFrame): #chooses which scoring object to use
     score_name = score_name.lower().strip()
     if score_name == "bic":
         return BicScore(df)
@@ -78,17 +76,17 @@ def make_score(score_name: str, df: pd.DataFrame):
 
 
 # ============================================================
-# BLACKLIST (your original logic)
+# BLACKLIST
 # ============================================================
 def build_blacklist(df):
 
     all_vars = list(df.columns)
 
     def has_prefix(c, prefixes):
-        return any(c.lower().startswith(p) for p in prefixes)
+        return any(c.lower().startswith(p) for p in prefixes) #Checks if column starts with any of those strings.
 
     def has_substring(c, subs):
-        return any(s in c.lower() for s in subs)
+        return any(s in c.lower() for s in subs) #Checks if column has inside the name any of those strings.
 
     layer0 = [v for v in all_vars if v in ["cores", "data_quality"]]
 

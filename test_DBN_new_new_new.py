@@ -9,6 +9,8 @@ from sklearn.cluster import DBSCAN
 
 from pgmpy.inference import VariableElimination
 
+import time
+
 # IMPORTANT: change this import to your actual create_dbn filename/module
 # from full_dynamic_bn_learn_final_new_new import build_dbn_model_2s
 from full_dynamic_bn_new_new_new import build_dbn_model_2s 
@@ -23,8 +25,8 @@ TRAIN_FRAC = 0.8
 TARGET = "throughput"
 
 # Sweep K (number of predictor features; TARGET is always included)
-#K_VALUES = [3, 5, 8, 10, 12, 15, 20]
-K_VALUES = [3, 5]
+K_VALUES = [5, 8, 10, 12, 15, 20, 30, 50, 80] #number of predictor variables kept after feature selection
+#K_VALUES = [3, 5]
 
 # Methods
 FEATURE_SELECTION_METHODS = ["markov", "mrmr", "pca"]
@@ -468,7 +470,9 @@ def main():
             for disc in DISCRETIZATION_METHODS:
                 for sc in SCORES:
                     try:
+                        start = time.perf_counter()
                         res, cols = run_one(raw, fs, disc, sc, k)
+                        elapsed = time.perf_counter() - start
                         rows.append({
                             "K": k,
                             "fs": fs,
@@ -478,9 +482,12 @@ def main():
                             "mean_prob_true": res["mean_prob_true"],
                             "n_features_including_target": len(cols),
                             "features": cols,
+                            "time_sec": elapsed,
                         })
-                        print(f"[OK] K={k:2d} fs={fs:6s} disc={disc:15s} score={sc:3s} -> {res}")
+                        #print(f"[OK] K={k:2d} fs={fs:6s} disc={disc:15s} score={sc:3s} -> {res}")
+                        print(f"[OK] K={k:2d} fs={fs:6s} disc={disc:15s} score={sc:3s} time={elapsed:.2f}s -> {res}")
                     except Exception as e:
+                        elapsed = time.perf_counter() - start
                         rows.append({
                             "K": k,
                             "fs": fs,
@@ -491,8 +498,10 @@ def main():
                             "n_features_including_target": np.nan,
                             "features": None,
                             "error": str(e),
+                            "time_sec": elapsed,
                         })
-                        print(f"[FAIL] K={k} fs={fs} disc={disc} score={sc}: {e}")
+                        #print(f"[FAIL] K={k} fs={fs} disc={disc} score={sc}: {e}")
+                        print(f"[FAIL] K={k} fs={fs} disc={disc} score={sc} time={elapsed:.2f}s: {e}")
 
     out = pd.DataFrame(rows)
 
