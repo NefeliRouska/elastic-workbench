@@ -14,7 +14,7 @@ services:
       - REDIS_INSTANCE=redis
       - DEFAULT_CLIENTS=buffer:250
       - TZ=Europe/Vienna # TODO: If I dont work ok Windows anymore, mount timezone volume
-      #- SUBSEQUENT_SERVICE=linked-service-2,elastic-workbench-linked-service,elastic-workbench-linked-service-2,8080
+      - SUBSEQUENT_SERVICE=linked-service-2,elastic-workbench-linked-service,elastic-workbench-linked-service-2,8080
       - SOURCE=True
     volumes:
       - ./share:/src/share # Linux
@@ -23,7 +23,7 @@ services:
       - "8080:8080" # Only needed on Windows
     depends_on:
       - redis
-    #  - linked-service-2
+      - linked-service-2
 
 
 
@@ -49,7 +49,7 @@ services:
       - "8081:8080" # Only needed on Windows
     depends_on:
       - redis
-    #  - linked-service-3
+      - linked-service-3
 
 
 

@@ -25,7 +25,7 @@ TRAIN_FRAC = 0.8
 TARGET = "throughput"
 
 # Sweep K (number of predictor features; TARGET is always included)
-K_VALUES = [5, 8, 10, 12, 15, 20, 30, 50, 80] #number of predictor variables kept after feature selection
+K_VALUES = [3, 5, 8, 10, 12, 15, 20, 30, 50] #number of predictor variables kept after feature selection
 #K_VALUES = [3, 5]
 
 # Methods
@@ -371,40 +371,44 @@ def apply_feature_selection(train_raw, test_raw, fs_method, k, score_name):
 # EVALUATION
 # ============================================================
 def evaluate(model_2s, test_df):
-    test_df = test_df.reset_index(drop=True)
-    infer = VariableElimination(model_2s)
+    test_df = test_df.reset_index(drop=True) #Reset index so that time t corresponds to row index t / ensures t and t+1 logic works correctly
+    infer = VariableElimination(model_2s) #Create inference engine for probabilistic queries / computes exact posterior probabilities
 
-    if EVIDENCE_MODE == "subset":
+# Choose which variables to condition on (evidence at time t)
+    if EVIDENCE_MODE == "subset": # This determines what information the model is allowed to see when predicting the next time step.
         ev_cols = list(EVIDENCE_SUBSET)
-    elif EVIDENCE_MODE == "full_no_target":
+    elif EVIDENCE_MODE == "full_no_target": #Use all variables EXCEPT current target → prevents trivial prediction using throughput(t) → throughput(t+1)
         ev_cols = [c for c in test_df.columns if c != TARGET]
     else:
-        ev_cols = list(test_df.columns)
+        ev_cols = list(test_df.columns) #use all variables including current target
 
-    model_nodes = set(model_2s.nodes())
+    # Some variables may have been removed during preprocessing. We only keep evidence variables that are present in the model.
+    model_nodes = set(model_2s.nodes()) 
     valid_cols = [c for c in ev_cols if f"{c}_t" in model_nodes]
 
-    n = len(test_df) - 1
+    n = len(test_df) - 1 # We predict t+1 from t, so we lose one step
     if n <= 0:
         return {"accuracy": float("nan"), "mean_prob_true": float("nan")}
 
-    correct = 0
-    probs_true = []
+    correct = 0 # number of correct predictions
+    probs_true = [] # probability assigned to the true state
 
     for t in range(n):
-        evidence = {f"{c}_t": int(test_df.iloc[t][c]) for c in valid_cols}
-        true_next = int(test_df.iloc[t + 1][TARGET])
+        evidence = {f"{c}_t": int(test_df.iloc[t][c]) for c in valid_cols} #Format required by pgmpy: # {"variable_t": state_value}
+        true_next = int(test_df.iloc[t + 1][TARGET]) #True value at next time step
 
-        q = infer.query([f"{TARGET}_t1"], evidence=evidence, show_progress=False)
-        probs = q.values / q.values.sum()
+        q = infer.query([f"{TARGET}_t1"], evidence=evidence, show_progress=False) # This returns a full probability distribution over all possible states of the target at the next time step.
+        probs = q.values / q.values.sum() # Convert to normalized probability vector
 
-        pred = int(np.argmax(probs))
-        probs_true.append(float(probs[true_next]))
+        pred = int(np.argmax(probs)) # Predicted state = most probable state (argmax)
+        probs_true.append(float(probs[true_next])) # Store probability assigned to the TRUE state / This measures probabilistic confidence in correct outcome
         if pred == true_next:
-            correct += 1
+            correct += 1 # Count correct predictions
 
     return {"accuracy": correct / n, "mean_prob_true": float(np.mean(probs_true))}
 
+# Accuracy: proportion of time steps where the most probable predicted state matched the true next state
+# Mean probability of true state: average probability mass assigned to the correct state across all predictions
 
 # ============================================================
 # MAIN EXPERIMENT LOOP (K sweep)
