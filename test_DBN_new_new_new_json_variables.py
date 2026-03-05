@@ -15,14 +15,12 @@ import time
 # from full_dynamic_bn_learn_final_new_new import build_dbn_model_2s
 from full_dynamic_bn_new_new_new import build_dbn_model_2s 
 
-
-
 # ============================================================
 # CONFIG
 # ============================================================
 CSV_PATH = "share/metrics/dbn_wide.csv"
 TRAIN_FRAC = 0.8
-TARGET = "throughput"
+TARGETS = ["throughput_1", "throughput_2", "throughput_3"]
 
 # Sweep K (number of predictor features; TARGET is always included)
 K_VALUES = [3, 5, 8, 10, 12, 15, 20, 30, 50] #number of predictor variables kept after feature selection
@@ -378,7 +376,7 @@ def evaluate(model_2s, test_df):
     if EVIDENCE_MODE == "subset": # This determines what information the model is allowed to see when predicting the next time step.
         ev_cols = list(EVIDENCE_SUBSET)
     elif EVIDENCE_MODE == "full_no_target": #Use all variables EXCEPT current target → prevents trivial prediction using throughput(t) → throughput(t+1)
-        ev_cols = [c for c in test_df.columns if c != TARGET]
+        ev_cols = [c for c in test_df.columns if not c.startswith("throughput_")]
     else:
         ev_cols = list(test_df.columns) #use all variables including current target
 
@@ -466,58 +464,69 @@ def run_one(raw_df, fs_method, disc_method, score_name, k):
 
 
 def main():
-    raw = load_and_clean(CSV_PATH)
+    global TARGET
 
-    rows = []
-    for k in K_VALUES:
-        for fs in FEATURE_SELECTION_METHODS:
-            for disc in DISCRETIZATION_METHODS:
-                for sc in SCORES:
-                    try:
-                        start = time.perf_counter()
-                        res, cols = run_one(raw, fs, disc, sc, k)
-                        elapsed = time.perf_counter() - start
-                        rows.append({
-                            "K": k,
-                            "fs": fs,
-                            "disc": disc,
-                            "score": sc,
-                            "accuracy": res["accuracy"],
-                            "mean_prob_true": res["mean_prob_true"],
-                            "n_features_including_target": len(cols),
-                            "features": cols,
-                            "time_sec": elapsed,
-                        })
-                        #print(f"[OK] K={k:2d} fs={fs:6s} disc={disc:15s} score={sc:3s} -> {res}")
-                        print(f"[OK] K={k:2d} fs={fs:6s} disc={disc:15s} score={sc:3s} time={elapsed:.2f}s -> {res}")
-                    except Exception as e:
-                        elapsed = time.perf_counter() - start
-                        rows.append({
-                            "K": k,
-                            "fs": fs,
-                            "disc": disc,
-                            "score": sc,
-                            "accuracy": np.nan,
-                            "mean_prob_true": np.nan,
-                            "n_features_including_target": np.nan,
-                            "features": None,
-                            "error": str(e),
-                            "time_sec": elapsed,
-                        })
-                        #print(f"[FAIL] K={k} fs={fs} disc={disc} score={sc}: {e}")
-                        print(f"[FAIL] K={k} fs={fs} disc={disc} score={sc} time={elapsed:.2f}s: {e}")
+    all_results = []
 
-    out = pd.DataFrame(rows)
+    for tgt in TARGETS:
+        TARGET = tgt
+        print(f"\n==============================")
+        print(f" RUNNING EXPERIMENTS FOR TARGET = {TARGET}")
+        print(f"==============================\n")
 
-    # Sort to inspect best configs quickly
-    out_sorted = out.sort_values(by=["accuracy", "mean_prob_true"], ascending=False)
-    print("\n=== TOP RESULTS ===")
-    with pd.option_context("display.max_colwidth", 120):
-        print(out_sorted.head(20)[["K", "fs", "disc", "score", "accuracy", "mean_prob_true", "n_features_including_target"]].to_string(index=False))
+        raw = load_and_clean(CSV_PATH)
 
-    out.to_csv("dbn_k_sweep_results.csv", index=False)
+        rows = []
+        for k in K_VALUES:
+            for fs in FEATURE_SELECTION_METHODS:
+                for disc in DISCRETIZATION_METHODS:
+                    for sc in SCORES:
+                        try:
+                            start = time.perf_counter()
+                            res, cols = run_one(raw, fs, disc, sc, k)
+                            elapsed = time.perf_counter() - start
+                            rows.append({
+                                "target": TARGET,
+                                "K": k,
+                                "fs": fs,
+                                "disc": disc,
+                                "score": sc,
+                                "accuracy": res["accuracy"],
+                                "mean_prob_true": res["mean_prob_true"],
+                                "n_features_including_target": len(cols),
+                                "features": cols,
+                                "time_sec": elapsed,
+                            })
+                            print(f"[OK] target={TARGET} K={k:2d} fs={fs:6s} disc={disc:15s} score={sc:3s} time={elapsed:.2f}s -> {res}")
+                        except Exception as e:
+                            elapsed = time.perf_counter() - start
+                            rows.append({
+                                "target": TARGET,
+                                "K": k,
+                                "fs": fs,
+                                "disc": disc,
+                                "score": sc,
+                                "accuracy": np.nan,
+                                "mean_prob_true": np.nan,
+                                "n_features_including_target": np.nan,
+                                "features": None,
+                                "error": str(e),
+                                "time_sec": elapsed,
+                            })
+                            print(f"[FAIL] target={TARGET} K={k} fs={fs} disc={disc} score={sc} time={elapsed:.2f}s: {e}")
+
+        out = pd.DataFrame(rows)
+
+        out_sorted = out.sort_values(by=["accuracy", "mean_prob_true"], ascending=False)
+        print("\n=== TOP RESULTS ===")
+        with pd.option_context("display.max_colwidth", 120):
+            print(out_sorted.head(50)[["target", "K", "fs", "disc", "score", "accuracy", "mean_prob_true", "n_features_including_target"]].to_string(index=False))
+
+        all_results.append(out)
+
+    final = pd.concat(all_results, ignore_index=True)
+    final.to_csv("dbn_k_sweep_results.csv", index=False)
     print("\nSaved: dbn_k_sweep_results.csv")
-
 
 if __name__ == "__main__":
     main()

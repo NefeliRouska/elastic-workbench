@@ -31,7 +31,7 @@ ENDPOINTS = {
 
 # Core constraints
 TOTAL_CORES_BUDGET = 8
-MIN_CORES_PER_SERVICE = 1   # set to 0 if cores=0 is valid in your system
+MIN_CORES_PER_SERVICE = 2   # set to 0 if cores=0 is valid in your system
 MAX_CORES_PER_SERVICE = 8
 
 # Quality domain (values you allow each service to draw)
@@ -43,11 +43,11 @@ REPEATS_PER_CORE_TRIPLE = 10
 
 # Experiment timing
 RANDOM_SEED = 42
-STABILIZE_SEC = 10
-MEASURE_SEC   = 60
+STABILIZE_SEC = 30
+MEASURE_SEC   = 360
 
 # Prometheus query step
-STEP = "5s"  # keep close to your scrape interval
+STEP = "1s"  # keep close to your scrape interval
 
 OUTPUT_CSV = Path("share/metrics/prom_dump_all.csv")
 
