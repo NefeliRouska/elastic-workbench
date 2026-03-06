@@ -17,7 +17,7 @@ TARGET = "throughput"
 
 N_BINS = 4
 EVIDENCE_MODE = "full"
-EVIDENCE_SUBSET = ["throughput", "avg_p_latency", "cores", "data_quality"]
+#EVIDENCE_SUBSET = ["throughput", "avg_p_latency", "cores", "data_quality"]
 
 
 # ============================================================
