@@ -44,3 +44,4 @@ class HttpClient:
     def append_finished_frames(self, service: ServiceID, finished_frames):
         thread = threading.Thread(target=self._append_finished_frames, args=(service, finished_frames))
         thread.start()
+

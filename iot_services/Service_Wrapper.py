@@ -49,6 +49,9 @@ def init_service(s_type):
 class ServiceWrapper:
     def __init__(self, s_type, start_processing=False):
         self.service: IoTService = init_service(s_type)
+###
+        if self.service.service_type == ServiceType.LS:
+            self.service.client_arrivals['buffer'] = 0
         self.docker_client = DockerClient()
         self.bounds = self.service.es_registry.get_boundaries_minimalistic(self.service.service_type, MAX_CORES)
 
@@ -102,8 +105,14 @@ class ServiceWrapper:
 
         current_buffer = self.service.client_arrivals['buffer']
         new_buffer = current_buffer + finished_frames
+###
+        # IMPORTANT:
+        # Update buffer directly, do NOT use change_request_arrival(),
+        # because that turns buffer into "RPS".
+        self.service.client_arrivals['buffer'] = new_buffer
 
-        self.service.change_request_arrival("buffer", new_buffer)
+        ###self.service.change_request_arrival("buffer", new_buffer)
+
         logger.info(f"Predecessing service provided {finished_frames} new frames, new length is {self.service.client_arrivals['buffer']}")
         return ""
 

@@ -115,7 +115,18 @@ class IoTService(ABC):
 
             try:
                 # logger.info(f"picking {utils.to_absolut_rps(self.client_arrivals)} frames...")
-                buffer = self.data_stream.get_batch(utils.to_absolut_rps(self.client_arrivals), shift = self.global_cycle_counter)
+                ###
+                # Determine how many items this service should try to process this cycle
+                if self.service_type == ServiceType.LS and 'buffer' in self.client_arrivals:
+                    # Linked downstream service: consume from queued work, not from total RPS
+                    #batch_size = self.client_arrivals.get('buffer', 0)
+                    batch_size = min(self.client_arrivals.get('buffer', 0), 300)
+                else:
+                    # Normal service behavior
+                    batch_size = utils.to_absolut_rps(self.client_arrivals)
+
+                buffer = self.data_stream.get_batch(batch_size, shift=self.global_cycle_counter)
+                ###buffer = self.data_stream.get_batch(utils.to_absolut_rps(self.client_arrivals), shift = self.global_cycle_counter)
                 future_dict = {executor.submit(self.process_one_iteration, frame): frame for frame in buffer}
 
                 while future_dict:

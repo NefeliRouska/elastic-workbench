@@ -32,19 +32,19 @@ ENDPOINTS = {
 
 # Core constraints
 TOTAL_CORES_BUDGET = 8
-MIN_CORES_PER_SERVICE = 2   # set to 0 if cores=0 is valid in your system
+MIN_CORES_PER_SERVICE = 1   # set to 0 if cores=0 is valid in your system
 MAX_CORES_PER_SERVICE = 8
 
 # Quality domain (values you allow each service to draw)
-QUALITIES = list(range(200, 1001, 100))
+QUALITIES = list(range(100, 1001, 100))
 
 # Instead of (core_triples x global_quality), we do repeats per core triple,
 # because quality is now sampled as a *triple* (q1,q2,q3) each run.
-REPEATS_PER_CORE_TRIPLE = 5
+REPEATS_PER_CORE_TRIPLE = 10
 
 # Experiment timing
-STABILIZE_SEC = 20
-MEASURE_SEC = 100
+STABILIZE_SEC = 30
+MEASURE_SEC = 360
 
 # Prometheus query step
 STEP = "1s"  # keep close to your scrape interval
@@ -407,6 +407,13 @@ def main():
             restart_containers()
 
         run_experiment(seed)
+
+    print("\nAll seeds completed. Stopping containers...")
+
+    subprocess.run(
+        ["docker", "compose", "-f", DOCKER_COMPOSE_FILE, "down"],
+        check=True
+    )
 
 
 if __name__ == "__main__":

@@ -30,20 +30,23 @@ class LinkedService(IoTService):
         self.data_stream = VideoReader(ROOT + "/data/QR_Video.mp4")
 
         self.http_client = HttpClient()
-        self.subsequent_service = linked_service
+        self.subsequent_service = linked_service #This means each service can now know:  whether it is the source of the chain  which service comes after it
         self.is_source = is_source
-
+#
     def post_process(self, processed_items: int):
-
-        # Local postcondition
+###
         if not self.is_source:
-            self.client_arrivals['buffer'] -= processed_items
+            current_buffer = self.client_arrivals.get('buffer', 0)
+            self.client_arrivals['buffer'] = max(0, current_buffer - processed_items)
+        # Local postcondition
+        #if not self.is_source:
+            #self.client_arrivals['buffer'] -= processed_items #That means service 2 and service 3 do not create their own workload anymore. They only process what is already in their buffer.
         logger.info(f"Finished {processed_items} frames, current buffer load is {self.client_arrivals['buffer']}")
 
         # Remote postcondition
         if self.subsequent_service is not None:
             self.http_client.append_finished_frames(self.subsequent_service, processed_items)
-
+#
     def get_service_parallelism(self) -> int:
         return utils.cores_to_threads(self.cores_reserved)
 
