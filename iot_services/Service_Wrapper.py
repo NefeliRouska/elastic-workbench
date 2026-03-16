@@ -109,7 +109,7 @@ class ServiceWrapper:
         # IMPORTANT:
         # Update buffer directly, do NOT use change_request_arrival(),
         # because that turns buffer into "RPS".
-        self.service.client_arrivals['buffer'] = new_buffer
+        self.service.client_arrivals['buffer'] = new_buffer #incoming frames for downstream services are stored as queue backlog, not rps
 
         ###self.service.change_request_arrival("buffer", new_buffer)
 

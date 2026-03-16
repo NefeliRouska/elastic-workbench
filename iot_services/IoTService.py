@@ -49,7 +49,9 @@ class IoTService(ABC):
         self.prom_cores = Gauge('cores', 'Current configured cores', ['service_type', 'container_id', 'metric_id'])
         self.prom_model_size = Gauge('model_size', 'Current model size', ['service_type', 'container_id', 'metric_id'])
         self.buffer_size = Gauge('buffer_size', 'Current buffer size', ['service_type', 'container_id', 'metric_id'])
-
+        ###
+        #self.arrival_rps = Gauge('arrival_rps','Current source arrival rate',['service_type', 'container_id', 'metric_id'])
+        ###
     def export_processing_metrics(self, processed_item_counter, processed_item_durations):
         # This is only executed once after the batch is processed
         self.prom_throughput.labels(container_id=self.docker_container_ref, service_type=self.service_type.value,
@@ -61,7 +63,10 @@ class IoTService(ABC):
                                metric_id="cores").set(self.cores_reserved)
         self.prom_quality.labels(container_id=self.docker_container_ref, service_type=self.service_type.value,
                                  metric_id="data_quality").set(self.service_conf['data_quality'])
-
+###
+#        self.arrival_rps.labels(container_id=self.docker_container_ref, service_type=self.service_type.value, 
+#                                metric_id="arrival_rps").set(utils.to_absolut_rps(self.client_arrivals))
+###
         if self.service_type == ServiceType.CV or self.service_type == ServiceType.PC:
             self.prom_model_size.labels(container_id=self.docker_container_ref, service_type=self.service_type.value,
                                         metric_id="model_size").set(self.service_conf['model_size'])
@@ -118,14 +123,15 @@ class IoTService(ABC):
                 ###
                 # Determine how many items this service should try to process this cycle
                 if self.service_type == ServiceType.LS and 'buffer' in self.client_arrivals:
-                    # Linked downstream service: consume from queued work, not from total RPS
+                    #Linked downstream service so 2 and 3: process work from queued work, not from total RPS
                     #batch_size = self.client_arrivals.get('buffer', 0)
-                    batch_size = min(self.client_arrivals.get('buffer', 0), 300)
+                    batch_size = min(self.client_arrivals.get('buffer', 0), 500)
                 else:
-                    # Normal service behavior
+                    # Normal service behavior service 1
                     batch_size = utils.to_absolut_rps(self.client_arrivals)
 
-                buffer = self.data_stream.get_batch(batch_size, shift=self.global_cycle_counter)
+                buffer = self.data_stream.get_batch(batch_size)
+                
                 ###buffer = self.data_stream.get_batch(utils.to_absolut_rps(self.client_arrivals), shift = self.global_cycle_counter)
                 future_dict = {executor.submit(self.process_one_iteration, frame): frame for frame in buffer}
 
