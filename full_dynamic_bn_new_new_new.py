@@ -79,31 +79,34 @@ def make_score(score_name: str, df: pd.DataFrame): #chooses which scoring object
 # BLACKLIST
 # ============================================================
 def build_blacklist(df):
-
     all_vars = list(df.columns)
 
     def has_prefix(c, prefixes):
-        return any(c.lower().startswith(p) for p in prefixes) #Checks if column starts with any of those strings.
+        c = c.lower()
+        return any(c.startswith(p) for p in prefixes)
 
     def has_substring(c, subs):
-        return any(s in c.lower() for s in subs) #Checks if column has inside the name any of those strings.
+        c = c.lower()
+        return any(s in c for s in subs)
 
-    layer0 = [v for v in all_vars if v in ["cores", "data_quality"]]
+    layer0 = [v for v in all_vars if has_prefix(
+        v, ["cores_", "data_quality_"])]
 
     layer1 = [v for v in all_vars if has_prefix(
-        v, ["container_cpu_", "container_memory_", "container_network_", "container_fs_"]
-    )]
+        v, ["container_cpu_", "container_memory_", "container_network_", "container_fs_", "container_blkio_"])]
 
-    layer2 = [v for v in all_vars if v in ["throughput", "avg_p_latency", "buffer_size"]]
+    layer2 = [v for v in all_vars if has_prefix(
+        v,["throughput_", "avg_p_latency_", "buffer_size_"])]
 
-    layer3 = [v for v in all_vars if has_substring(v, ["fail", "oom", "scrape_error"])]
+    layer3 = [v for v in all_vars if has_substring(
+        v, ["fail", "oom", "scrape_error"])]
 
     layers = [layer0, layer1, layer2, layer3]
     layer_index = {v: i for i, L in enumerate(layers) for v in L}
 
     black = []
 
-    # layer0 no parents
+    # layer0 has no parents
     for child in layer0:
         for parent in all_vars:
             if parent != child:
