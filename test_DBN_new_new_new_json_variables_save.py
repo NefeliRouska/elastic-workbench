@@ -53,10 +53,10 @@ EVIDENCE_SUBSET = ["avg_p_latency_", "cores_", "data_quality_", "buffer_size_"]
 
 # Save only top N models per target
 TOP_N_MODELS_TO_SAVE = 5
-MODEL_SAVE_DIR = "saved_dbn_models_top5_20260310_160246_seed161312"
+MODEL_SAVE_DIR = "saved_dbn_models_top5_20260310_160246_seed161312_5000"
 
 # Output CSV
-RESULTS_CSV_PATH = "dbn_k_sweep_results_top5_saved_20260310_160246_seed161312.csv"
+RESULTS_CSV_PATH = "dbn_k_sweep_results_top5_saved_20260310_160246_seed161312_5000.csv"
 
 
 # ============================================================
@@ -525,7 +525,7 @@ def main():
         print("==============================\n")
 
         raw = load_and_clean(CSV_PATH)
-        raw = raw.iloc[:50000].reset_index(drop=True) #### not full file
+        raw = raw.iloc[:5000].reset_index(drop=True) #### not full file
         rows = []
 
         for k in K_VALUES:
