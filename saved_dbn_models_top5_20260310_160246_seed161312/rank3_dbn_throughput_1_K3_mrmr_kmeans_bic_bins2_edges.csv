@@ -1,0 +1,7 @@
+parent,child
+avg_p_latency_1_t,throughput_1_t
+avg_p_latency_1_t,python_gc_objects_collected_total_1_t1
+throughput_1_t,avg_p_latency_1_t1
+scrape_duration_seconds_1_t,avg_p_latency_1_t
+avg_p_latency_1_t1,throughput_1_t1
+scrape_duration_seconds_1_t1,avg_p_latency_1_t1

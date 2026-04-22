@@ -1,0 +1,16 @@
+parent,child
+pca_1_t,pca_2_t
+pca_1_t,pca_3_t
+pca_1_t,throughput_1_t
+pca_1_t,pca_1_t1
+pca_1_t,throughput_1_t1
+pca_2_t,pca_3_t
+pca_2_t,pca_2_t1
+pca_3_t,throughput_1_t
+pca_3_t,pca_3_t1
+pca_3_t,throughput_1_t1
+pca_1_t1,pca_2_t1
+pca_1_t1,pca_3_t1
+pca_1_t1,throughput_1_t1
+pca_2_t1,pca_3_t1
+pca_3_t1,throughput_1_t1

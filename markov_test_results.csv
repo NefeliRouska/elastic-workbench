@@ -1,0 +1,10 @@
+target,n_bins,score_first,score_second,difference,verdict
+throughput_1,3,0.754499503237219,0.7495964215456261,-0.004903081691592925,"HOLDS — difference < 2%, first-order Markov assumption is justified"
+throughput_1,4,0.6976746875681534,0.6553498377535307,-0.0423248498146227,"BORDERLINE — difference 2-5%, weak memory effect, acknowledge in paper"
+throughput_1,5,0.643348996230771,0.6204527480564569,-0.022896248174314127,"BORDERLINE — difference 2-5%, weak memory effect, acknowledge in paper"
+throughput_2,3,0.7763163112224329,0.7887599435166399,0.012443632294206974,"HOLDS — difference < 2%, first-order Markov assumption is justified"
+throughput_2,4,0.7445609432104313,0.7513499611181239,0.006789017907692596,"HOLDS — difference < 2%, first-order Markov assumption is justified"
+throughput_2,5,0.5979297879230469,0.6024696049469201,0.004539817023873294,"HOLDS — difference < 2%, first-order Markov assumption is justified"
+throughput_3,3,0.7827097914036908,0.7734689022093277,-0.009240889194363056,"HOLDS — difference < 2%, first-order Markov assumption is justified"
+throughput_3,4,0.6909709234060083,0.7102252725586478,0.01925434915263946,"HOLDS — difference < 2%, first-order Markov assumption is justified"
+throughput_3,5,0.6172327118841958,0.6156950603495183,-0.0015376515346775532,"HOLDS — difference < 2%, first-order Markov assumption is justified"

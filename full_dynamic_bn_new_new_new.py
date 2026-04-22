@@ -8,11 +8,11 @@ from pgmpy.models import BayesianNetwork
 # ----------------------------
 # CONFIG DEFAULTS
 # ----------------------------
-MAX_INDEGREE = 4 #no node can have more than 4 parents.
-HC_MAX_ITER = 25000 #the hill-climb search can take up to 25,000 steps (moves)
-HC_TABU_LENGTH = 100 #hill-climb uses a tabu list (memory of recent moves) to reduce cycling and local traps.
-HC_EPSILON = 1e-4 #stopping threshold: if improvements are smaller than this, search can stop
-HC_USE_CACHE = True #caches score computations to speed up repeated evaluations
+MAX_INDEGREE = 4 #no node can have more than 4 parents - limits model complexity / [2, 3, 4, 5]
+HC_MAX_ITER = 25000 #the hill-climb search can take up to 25,000 steps (moves) - how long hill-climbing runs [5000, 10000, 25000, 50000]
+HC_TABU_LENGTH = 100 #hill-climb uses a tabu list (memory of recent moves) to reduce cycling and local traps - avoids undoing recent moves [25, 50, 100, 200]
+HC_EPSILON = 1e-4 #stopping threshold: if improvements are smaller than this, search can stop - stopping condition
+HC_USE_CACHE = True #caches score computations to speed up repeated evaluations - speed optimization
 
 
 # ----------------------------
@@ -89,17 +89,13 @@ def build_blacklist(df):
         c = c.lower()
         return any(s in c for s in subs)
 
-    layer0 = [v for v in all_vars if has_prefix(
-        v, ["cores_", "data_quality_"])]
+    layer0 = [v for v in all_vars if has_prefix(v, ["cores_", "data_quality_"])]
 
-    layer1 = [v for v in all_vars if has_prefix(
-        v, ["container_cpu_", "container_memory_", "container_network_", "container_fs_", "container_blkio_"])]
+    layer1 = [v for v in all_vars if has_prefix(v, ["container_cpu_", "container_memory_", "container_network_", "container_fs_", "container_blkio_"])]
 
-    layer2 = [v for v in all_vars if has_prefix(
-        v,["throughput_", "avg_p_latency_", "buffer_size_"])]
+    layer2 = [v for v in all_vars if has_prefix(v,["throughput_", "avg_p_latency_", "buffer_size_"])]
 
-    layer3 = [v for v in all_vars if has_substring(
-        v, ["fail", "oom", "scrape_error"])]
+    layer3 = [v for v in all_vars if has_substring(v, ["fail", "oom", "scrape_error"])]
 
     layers = [layer0, layer1, layer2, layer3]
     layer_index = {v: i for i, L in enumerate(layers) for v in L}
