@@ -14,17 +14,33 @@ from pgmpy.inference import VariableElimination
 from pgmpy.estimators import HillClimbSearch, BayesianEstimator
 from pgmpy.models import BayesianNetwork
 from full_dynamic_bn_new_new_new import build_dbn_model_2s, make_score
+from pathlib import Path
+import argparse
 
 
 # ============================================================
 # CONFIG
 # ============================================================
-
 # --- Single CSV (currently active) ---
-CSV_PATH = "share/metrics/dbn_wide_20260310_160246_seed161312.csv"
+#CSV_PATH = "share/metrics/dbn_wide_20260310_160246_seed161312.csv"
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="DBN hyperparameter sweep"
+    )
+    parser.add_argument(
+        "--csv",
+        type=str,
+        required=True,
+        help="Path to wide DBN CSV file"
+    )
+    return parser.parse_args()
+
+args = parse_args()
+CSV_PATH = args.csv
 
 TRAIN_FRAC = 0.8
-TARGETS    = ["throughput_1", "throughput_2", "throughput_3"]
+#TARGETS    = ["throughput_1", "throughput_2", "throughput_3"]
+TARGETS    = ["throughput_3"]
 
 K_VALUES                  = [3, 8, 12, 20]
 FEATURE_SELECTION_METHODS = ["markov", "mrmr", "pca"]
@@ -41,11 +57,15 @@ MB_QUICK_MAX_ITER = 8000
 EVIDENCE_MODE   = "full_no_target"
 EVIDENCE_SUBSET = ["avg_p_latency_", "cores_", "data_quality_", "buffer_size_"]
 
-EXCLUDE_OTHER_THROUGHPUTS = True
+EXCLUDE_OTHER_THROUGHPUTS = False
 
 TOP_N_MODELS_TO_SAVE = 5
-MODEL_SAVE_DIR       = "saved_dbn_models_top5_20260310_160246_seed161312"
-RESULTS_CSV_PATH     = "dbn_k_sweep_results_20260310_160246_seed161312.csv"
+
+_stem = Path(CSV_PATH).stem.replace("dbn_wide_", "")
+MODEL_SAVE_DIR   = f"saved_dbn_models_top5_{_stem}"
+RESULTS_CSV_PATH = f"dbn_k_sweep_results_{_stem}.csv"
+#MODEL_SAVE_DIR       = "saved_dbn_models_top5_20260310_160246_seed161312"
+#RESULTS_CSV_PATH     = "dbn_k_sweep_results_20260310_160246_seed161312.csv"
 
 # Temporal aggregation:
 # Raw data is 1-second resolution. We average every
@@ -60,7 +80,7 @@ MAX_ROWS = None  # set to integer for debug runs
 # ============================================================
 # LOAD + CLEAN
 # ============================================================
-def load_and_clean(path):
+def load_and_clean(path, target):
     """
     Load the raw wide CSV and clean it.
     Returns dataframe at original 1-second resolution.
@@ -92,8 +112,8 @@ def load_and_clean(path):
     df = df.select_dtypes(include=[np.number])
     df = df.dropna().reset_index(drop=True)
 
-    if TARGET not in df.columns:
-        raise ValueError(f"TARGET '{TARGET}' not found after cleaning.")
+    if target not in df.columns:
+        raise ValueError(f"TARGET '{target}' not found after cleaning.")
 
     return df
 
@@ -785,7 +805,7 @@ def main():
         print("==============================\n")
 
         # --- Load single CSV (currently active) ---
-        raw = load_and_clean(CSV_PATH)
+        raw = load_and_clean(CSV_PATH, TARGET)
 
         raw = aggregate_to_modeling_granularity(raw)
 
