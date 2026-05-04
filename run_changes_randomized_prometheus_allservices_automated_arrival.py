@@ -73,7 +73,7 @@ GLOBAL_START_TIME = time.time()
 
 # Patterns to include in the experiment
 WORKLOAD_PATTERNS = [
-    "once_in_a_lifetime"
+    "unpredictable"
 ]
 # WORKLOAD_PATTERNS = [
 #     "static",
@@ -104,7 +104,7 @@ OIAL_SPIKE_SEC = 180        # 3 min spike
 
 # Unpredictable workload: new random value every 10 minutes
 UNPREDICTABLE_MIN = 100
-UNPREDICTABLE_MAX = 600
+UNPREDICTABLE_MAX = 500
 UNPREDICTABLE_STEP_SEC = 600  # 10 minutes
 
 # How often the controller checks whether the workload should change.

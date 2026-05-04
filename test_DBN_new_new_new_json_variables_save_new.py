@@ -60,12 +60,17 @@ EVIDENCE_SUBSET = ["avg_p_latency_", "cores_", "data_quality_", "buffer_size_"]
 EXCLUDE_OTHER_THROUGHPUTS = False
 
 TOP_N_MODELS_TO_SAVE = 5
+<<<<<<< HEAD
 
 _stem = Path(CSV_PATH).stem.replace("dbn_wide_", "")
 MODEL_SAVE_DIR   = f"saved_dbn_models_top5_{_stem}"
 RESULTS_CSV_PATH = f"dbn_k_sweep_results_{_stem}.csv"
 #MODEL_SAVE_DIR       = "saved_dbn_models_top5_20260310_160246_seed161312"
 #RESULTS_CSV_PATH     = "dbn_k_sweep_results_20260310_160246_seed161312.csv"
+=======
+MODEL_SAVE_DIR       = "saved_dbn_models_top5_20260310_160246_seed161312_run20260422"
+RESULTS_CSV_PATH     = "dbn_k_sweep_results_20260310_160246_seed161312_run2026042.csv"
+>>>>>>> 5a6488d (add results and log for 20260313_192652_seed783122 run)
 
 # Temporal aggregation:
 # Raw data is 1-second resolution. We average every
