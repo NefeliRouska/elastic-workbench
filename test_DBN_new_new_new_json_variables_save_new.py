@@ -6,6 +6,7 @@ import gc
 import heapq
 import numpy as np
 import pandas as pd
+from datetime import datetime
 from sklearn.preprocessing import KBinsDiscretizer
 from sklearn.decomposition import PCA
 from sklearn.feature_selection import mutual_info_regression
@@ -61,7 +62,9 @@ EXCLUDE_OTHER_THROUGHPUTS = False
 
 TOP_N_MODELS_TO_SAVE = 5
 
-_stem = Path(CSV_PATH).stem.replace("dbn_wide_", "")
+_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+_stem = Path(CSV_PATH).stem.replace("dbn_wide_", "") + f"_run{_timestamp}"
+
 MODEL_SAVE_DIR   = f"saved_dbn_models_top5_{_stem}"
 RESULTS_CSV_PATH = f"dbn_k_sweep_results_{_stem}.csv"
 #MODEL_SAVE_DIR       = "saved_dbn_models_top5_20260310_160246_seed161312"
@@ -394,7 +397,7 @@ def apply_feature_selection(train_raw, test_raw, fs_method, k,
         #keep = predictors + [TARGET]
         always_keep = [c for c in train_raw.columns if c.startswith("throughput_")]
         keep = list(dict.fromkeys(predictors + [TARGET] + always_keep))  # dedup, preserve order
-        
+
         return train_raw[keep].copy(), test_raw[keep].copy(), mb_size, mb_fallback
 
     if fs_method == "pca":
