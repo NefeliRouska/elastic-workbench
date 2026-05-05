@@ -474,6 +474,15 @@ class TopNModelTracker:
         return row_dict
 
     def _save_all(self):
+        # Clean up all existing rank files for this target before rewriting
+        if os.path.exists(MODEL_SAVE_DIR):
+            for f in os.listdir(MODEL_SAVE_DIR):
+                if f.startswith("rank") and f"_{self.target}_" in f:
+                    try:
+                        os.remove(os.path.join(MODEL_SAVE_DIR, f))
+                    except OSError:
+                        pass
+
         sorted_entries = sorted(self.heap, key=lambda e: e[0], reverse=True)
         for rank, (acc, uid, rd, mdl, k, fs, disc, sc, nb) in enumerate(
                 sorted_entries, start=1):
