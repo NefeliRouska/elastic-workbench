@@ -317,6 +317,14 @@ def _build_blacklist_single_slice(df):
             if p != c and p in layer_index and c in layer_index \
                     and layer_index[p] > layer_index[c]:
                 black.append((p, c))
+    
+    # Enforce pipeline order: throughput edges only go forward (S1 → S2 → S3)
+    throughputs = ["throughput_1", "throughput_2", "throughput_3"]
+    for i, t_child in enumerate(throughputs):
+        for t_parent in throughputs[i+1:]:  # downstream services can't cause upstream
+            if t_parent in all_vars and t_child in all_vars:
+                black.append((t_parent, t_child))
+    
     return black
 
 
