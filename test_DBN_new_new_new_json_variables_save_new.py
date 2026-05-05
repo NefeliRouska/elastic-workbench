@@ -42,7 +42,7 @@ TRAIN_FRAC = 0.8
 #TARGETS    = ["throughput_1", "throughput_2", "throughput_3"]
 TARGETS    = ["throughput_3"]
 
-K_VALUES                  = [3, 8, 12, 20]
+K_VALUES                  = [8, 12, 20]
 FEATURE_SELECTION_METHODS = ["markov", "mrmr", "pca"]
 DISCRETIZATION_METHODS    = ["classic_uniform", "classic_quantile", "kmeans", "dbscan"]
 SCORES                    = ["bic", "aic"]
@@ -380,7 +380,10 @@ def apply_feature_selection(train_raw, test_raw, fs_method, k,
 
     if fs_method == "mrmr":
         predictors = select_mrmr(train_raw, k)
-        keep = predictors + [TARGET]
+        #keep = predictors + [TARGET]
+        always_keep = [c for c in train_raw.columns if c.startswith("throughput_")]
+        keep = list(dict.fromkeys(predictors + [TARGET] + always_keep))  # dedup, preserve order
+        
         return train_raw[keep].copy(), test_raw[keep].copy(), None, None
 
     if fs_method == "markov":
@@ -388,7 +391,10 @@ def apply_feature_selection(train_raw, test_raw, fs_method, k,
             train_raw, k, score_name=score_name,
             n_bins=n_bins, disc_method=disc_method
         )
-        keep = predictors + [TARGET]
+        #keep = predictors + [TARGET]
+        always_keep = [c for c in train_raw.columns if c.startswith("throughput_")]
+        keep = list(dict.fromkeys(predictors + [TARGET] + always_keep))  # dedup, preserve order
+        
         return train_raw[keep].copy(), test_raw[keep].copy(), mb_size, mb_fallback
 
     if fs_method == "pca":
@@ -784,14 +790,32 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins):
           f"({100*res['cache_hits']/max(res['n_queries'],1):.1f}%) "
           f"unique evidence combos={res['cache_size']}")
 
-    # --- Two-step ahead (uncomment evaluate_two_step call when needed) ---
-    # res_t2 = evaluate_two_step(model_2s, test_ready, bin_centers)
-    # accuracy_t2 = res_t2["accuracy"]
-    # mae_t2      = res_t2["mae"]
-    accuracy_t2 = np.nan  # remove when uncommenting above
-    mae_t2      = np.nan  # remove when uncommenting above
+    # ── Evaluate all three throughputs on the same model ──────────────────
+    all_tput_results = {}
+    model_nodes = set(model_2s.nodes())
+    for eval_tgt in ["throughput_1", "throughput_2", "throughput_3"]:
+        t1_node = f"{eval_tgt}_t1"
+        if t1_node in model_nodes and eval_tgt in test_ready.columns:
+            saved_target = TARGET
+            globals()["TARGET"] = eval_tgt
+            try:
+                r = evaluate(model_2s, test_ready, bin_centers)
+                all_tput_results[eval_tgt] = r
+                print(f"  [{eval_tgt}] acc={r['accuracy']:.3f} "
+                      f"mae={r['mae']:.3f} prob={r['mean_prob_true']:.3f}")
+            except Exception as e:
+                print(f"  [{eval_tgt}] eval failed: {e}")
+                all_tput_results[eval_tgt] = None
+            finally:
+                globals()["TARGET"] = saved_target
+        else:
+            print(f"  [{eval_tgt}] not in model, skipping")
+            all_tput_results[eval_tgt] = None
+    # ──────────────────────────────────────────────────────────────────────
 
-    cols_used = list(train_ready.columns)
+    accuracy_t2 = np.nan
+    mae_t2      = np.nan
+    cols_used   = list(train_ready.columns)
 
     del train_raw, test_raw, train_fs, test_fs, disc
     gc.collect()
@@ -803,6 +827,7 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins):
         mb_size, mb_fallback,
         train_time_sec, eval_time_sec,
         accuracy_t2, mae_t2,
+        all_tput_results,
     )
 
 
@@ -859,6 +884,7 @@ def main():
                                     mb_size, mb_fallback,
                                     train_time_sec, eval_time_sec,
                                     accuracy_t2, mae_t2,
+                                    all_tput_results,
                                 ) = run_one(raw, fs, disc, sc, k, n_bins)
 
                                 elapsed = time.perf_counter() - start
@@ -895,6 +921,12 @@ def main():
                                     "exclude_other_throughputs": EXCLUDE_OTHER_THROUGHPUTS,
                                     "modeling_granularity_sec":  MODELING_GRANULARITY_SEC,
                                     "error":                     None,
+                                    "acc_tput1": all_tput_results.get("throughput_1", {}).get("accuracy", np.nan) if all_tput_results.get("throughput_1") else np.nan,
+                                    "acc_tput2": all_tput_results.get("throughput_2", {}).get("accuracy", np.nan) if all_tput_results.get("throughput_2") else np.nan,
+                                    "acc_tput3": all_tput_results.get("throughput_3", {}).get("accuracy", np.nan) if all_tput_results.get("throughput_3") else np.nan,
+                                    "mae_tput1": all_tput_results.get("throughput_1", {}).get("mae", np.nan) if all_tput_results.get("throughput_1") else np.nan,
+                                    "mae_tput2": all_tput_results.get("throughput_2", {}).get("mae", np.nan) if all_tput_results.get("throughput_2") else np.nan,
+                                    "mae_tput3": all_tput_results.get("throughput_3", {}).get("mae", np.nan) if all_tput_results.get("throughput_3") else np.nan,
                                 }
 
                                 # Live top-N saving
@@ -960,6 +992,12 @@ def main():
                                     "exclude_other_throughputs": EXCLUDE_OTHER_THROUGHPUTS,
                                     "modeling_granularity_sec":  MODELING_GRANULARITY_SEC,
                                     "error":                     str(e),
+                                    "acc_tput1": np.nan,
+                                    "acc_tput2": np.nan,
+                                    "acc_tput3": np.nan,
+                                    "mae_tput1": np.nan,
+                                    "mae_tput2": np.nan,
+                                    "mae_tput3": np.nan,
                                 })
                                 print(
                                     f"[FAIL] target={TARGET} K={k} n_bins={n_bins} "
