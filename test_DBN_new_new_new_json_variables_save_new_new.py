@@ -11,7 +11,7 @@ from sklearn.preprocessing import KBinsDiscretizer
 from sklearn.decomposition import PCA
 from sklearn.feature_selection import mutual_info_regression
 from sklearn.cluster import DBSCAN
-from sklearn.metrics import f1_score, log_loss
+from sklearn.metrics import f1_score, log_loss, precision_score, recall_score
 from pgmpy.inference import VariableElimination
 from pgmpy.estimators import HillClimbSearch, BayesianEstimator
 from pgmpy.models import BayesianNetwork
@@ -24,15 +24,9 @@ import argparse
 # CONFIG
 # ============================================================
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="DBN hyperparameter sweep"
-    )
-    parser.add_argument(
-        "--csv",
-        type=str,
-        required=True,
-        help="Path to wide DBN CSV file"
-    )
+    parser = argparse.ArgumentParser(description="DBN hyperparameter sweep")
+    parser.add_argument("--csv", type=str, required=True,
+                        help="Path to wide DBN CSV file")
     return parser.parse_args()
 
 args = parse_args()
@@ -66,7 +60,6 @@ MODEL_SAVE_DIR   = f"saved_dbn_models_top5_{_stem}"
 RESULTS_CSV_PATH = f"dbn_k_sweep_results_{_stem}.csv"
 
 MODELING_GRANULARITY_SEC = 30
-
 MAX_ROWS = None
 
 
@@ -118,16 +111,6 @@ def aggregate_to_modeling_granularity(df, every_n_seconds=MODELING_GRANULARITY_S
 # DISCRETIZATION
 # ============================================================
 class Discretizer:
-    """
-    Fits on train only; transforms train/test.
-
-    Methods:
-      - classic_uniform  : KBins strategy="uniform"
-      - classic_quantile : KBins strategy="quantile"
-      - kmeans           : KBins strategy="kmeans"
-      - dbscan           : density clusters, n_bins ignored
-    """
-
     def __init__(self, method, n_bins=4, dbscan_eps=0.3, dbscan_min_samples=10):
         self.method             = method
         self.n_bins             = n_bins
@@ -415,12 +398,6 @@ def save_dbn_model(model_2s, target, k, fs_method, disc_method,
 
 
 class TopNModelTracker:
-    """
-    Maintains the top-N models by accuracy for a single target.
-    Uses a min-heap to efficiently evict the worst model
-    when a better one arrives.
-    """
-
     def __init__(self, n, target):
         self.n        = n
         self.target   = target
@@ -484,52 +461,16 @@ class TopNModelTracker:
 def persistence_baseline(test_ready):
     """
     Persistence baseline: predict the current value as the next value.
-    No model, no probabilities. Reports accuracy and F1 only.
+    No model, no probabilities. Reports accuracy, F1, precision, recall.
     Log loss is not applicable — persistence produces no probabilities.
     """
     y_prev = test_ready[TARGET].iloc[:-1].to_numpy()
     y_true = test_ready[TARGET].iloc[1:].to_numpy()
-    acc    = float(np.mean(y_prev == y_true))
-    f1     = float(f1_score(y_true, y_prev, average="macro", zero_division=0))
-    return acc, f1
-
-
-
-
-
-# ============================================================
-# AUTOREGRESSIVE DBN BASELINE
-# ============================================================
-def autoregressive_dbn_baseline(train_ready, test_ready):
-    """
-    Autoregressive DBN baseline: each variable connects only to itself
-    at t+1. No cross-variable edges. Trained on data so it produces
-    calibrated probabilities unlike persistence.
-
-    This isolates the contribution of cross-variable structure learning:
-    the gap between this baseline and the learned DBN is entirely due
-    to the edges discovered between different variables.
-
-    Reports: accuracy, F1 (macro), log loss.
-    """
-    nodes = list(train_ready.columns)
-    edges = [(f"{v}_t", f"{v}_t1") for v in nodes]
-
-    df_t  = train_ready.iloc[:-1].reset_index(drop=True).add_suffix("_t")
-    df_t1 = train_ready.iloc[1:].reset_index(drop=True).add_suffix("_t1")
-    df_2s = pd.concat([df_t, df_t1], axis=1)
-
-    model = BayesianNetwork(edges)
-    model.fit(
-        df_2s,
-        estimator=BayesianEstimator,
-        prior_type="BDeu",
-        equivalent_sample_size=10,
-    )
-
-    res = evaluate(model, test_ready)
-    # f1 inside evaluate() already uses macro average
-    return res["accuracy"], res["f1"], res["log_loss"]
+    acc       = float(np.mean(y_prev == y_true))
+    f1        = float(f1_score(y_true, y_prev, average="macro", zero_division=0))
+    precision = float(precision_score(y_true, y_prev, average="macro", zero_division=0))
+    recall    = float(recall_score(y_true, y_prev, average="macro", zero_division=0))
+    return acc, f1, precision, recall
 
 
 # ============================================================
@@ -539,19 +480,12 @@ def evaluate(model_2s, test_df):
     """
     Evaluate a DBN model on test data.
 
-    Metrics reported:
-      - accuracy    : fraction of timesteps where predicted bin == true bin
-      - f1          : macro F1 score across all bins (equal weight per class,
-                      penalises poor performance on minority bins)
-      - log_loss    : mean negative log probability of the true class;
-                      penalises confident wrong predictions — the only metric
-                      that distinguishes models when class predictions are
-                      identical (as happens with bins=2 and sticky signals)
-
-    Inference cache: stores results for previously seen evidence
-    combinations to avoid redundant computation. With few bins
-    and few features, many rows share identical evidence — the
-    cache can give 10-50x speedup.
+    Metrics:
+      - accuracy  : fraction of timesteps where predicted bin == true bin
+      - f1        : macro F1 across all bins
+      - precision : macro precision across all bins
+      - recall    : macro recall across all bins
+      - log_loss  : mean negative log probability of the true class
     """
     test_df = test_df.reset_index(drop=True)
     infer   = VariableElimination(model_2s)
@@ -572,22 +506,24 @@ def evaluate(model_2s, test_df):
         return {
             "accuracy":  float("nan"),
             "f1":        float("nan"),
+            "precision": float("nan"),
+            "recall":    float("nan"),
             "log_loss":  float("nan"),
+            "cache_hits": 0,
+            "cache_size": 0,
+            "n_queries":  0,
         }
 
-    # Determine number of classes from training discretization
-    # (inferred from model states for the target node)
     target_t1_node = f"{TARGET}_t1"
     try:
         n_classes = len(model_2s.get_cpds(target_t1_node).state_names[target_t1_node])
     except Exception:
         n_classes = None
 
-    correct       = 0
-    y_true_list   = []
-    y_pred_list   = []
-    y_prob_list   = []   # list of full probability vectors for log loss
-
+    correct         = 0
+    y_true_list     = []
+    y_pred_list     = []
+    y_prob_list     = []
     inference_cache = {}
     cache_hits      = 0
 
@@ -616,22 +552,21 @@ def evaluate(model_2s, test_df):
 
     y_true_arr = np.array(y_true_list)
     y_pred_arr = np.array(y_pred_list)
-    y_prob_arr = np.array(y_prob_list)   # shape (n, n_classes)
+    y_prob_arr = np.array(y_prob_list)
 
-    accuracy = correct / n
-    f1       = float(f1_score(y_true_arr, y_pred_arr,
-                              average="macro", zero_division=0))
+    accuracy  = correct / n
+    f1        = float(f1_score(y_true_arr, y_pred_arr,
+                               average="macro", zero_division=0))
+    precision = float(precision_score(y_true_arr, y_pred_arr,
+                                      average="macro", zero_division=0))
+    recall    = float(recall_score(y_true_arr, y_pred_arr,
+                                   average="macro", zero_division=0))
 
-    # Log loss: sklearn expects shape (n_samples, n_classes)
-    # labels ensures all classes are accounted for even if some
-    # don't appear in this test window
     if n_classes is not None:
         labels = list(range(n_classes))
     else:
         labels = sorted(list(set(y_true_list)))
 
-    # Pad prob vectors if needed, then clip with epsilon and renormalize
-    # to avoid log(0) which makes log loss unstable or infinite
     if y_prob_arr.shape[1] < len(labels):
         pad = np.zeros((y_prob_arr.shape[0], len(labels) - y_prob_arr.shape[1]))
         y_prob_arr = np.hstack([y_prob_arr, pad])
@@ -645,11 +580,44 @@ def evaluate(model_2s, test_df):
     return {
         "accuracy":   accuracy,
         "f1":         f1,
+        "precision":  precision,
+        "recall":     recall,
         "log_loss":   ll,
         "cache_hits": cache_hits,
         "cache_size": len(inference_cache),
         "n_queries":  n,
     }
+
+
+# ============================================================
+# AUTOREGRESSIVE DBN BASELINE
+# ============================================================
+def autoregressive_dbn_baseline(train_ready, test_ready):
+    """
+    Autoregressive DBN baseline: each variable connects only to itself
+    at t+1. No cross-variable edges. Trained on data so it produces
+    calibrated probabilities unlike persistence.
+
+    Reports: accuracy, f1, precision, recall, log_loss.
+    """
+    nodes = list(train_ready.columns)
+    edges = [(f"{v}_t", f"{v}_t1") for v in nodes]
+
+    df_t  = train_ready.iloc[:-1].reset_index(drop=True).add_suffix("_t")
+    df_t1 = train_ready.iloc[1:].reset_index(drop=True).add_suffix("_t1")
+    df_2s = pd.concat([df_t, df_t1], axis=1)
+
+    model = BayesianNetwork(edges)
+    model.fit(
+        df_2s,
+        estimator=BayesianEstimator,
+        prior_type="BDeu",
+        equivalent_sample_size=10,
+    )
+
+    res = evaluate(model, test_ready)
+    return (res["accuracy"], res["f1"], res["precision"],
+            res["recall"], res["log_loss"])
 
 
 # ============================================================
@@ -696,15 +664,20 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins):
                                        if c not in other_thr]]
 
     # Baselines
-    persistence_acc, persistence_f1 = persistence_baseline(test_ready)
+    (persistence_acc, persistence_f1,
+     persistence_precision, persistence_recall) = persistence_baseline(test_ready)
 
     print("TRAIN_READY COLS:", train_ready.columns.tolist())
     print("TRAIN_READY LEN:", len(train_ready))
-    print(f"PERSISTENCE  acc={persistence_acc:.3f} f1={persistence_f1:.3f}")
+    print(f"PERSISTENCE  acc={persistence_acc:.3f} f1={persistence_f1:.3f} "
+          f"prec={persistence_precision:.3f} rec={persistence_recall:.3f}")
 
     # Autoregressive DBN baseline
-    ar_acc, ar_f1, ar_log_loss = autoregressive_dbn_baseline(train_ready, test_ready)
-    print(f"AR-DBN       acc={ar_acc:.3f} f1={ar_f1:.3f} log_loss={ar_log_loss:.4f}")
+    (ar_acc, ar_f1, ar_precision,
+     ar_recall, ar_log_loss) = autoregressive_dbn_baseline(train_ready, test_ready)
+    print(f"AR-DBN       acc={ar_acc:.3f} f1={ar_f1:.3f} "
+          f"prec={ar_precision:.3f} rec={ar_recall:.3f} "
+          f"log_loss={ar_log_loss:.4f}")
 
     # Learned DBN
     t_train_start = time.perf_counter()
@@ -735,7 +708,8 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins):
                 r = evaluate(model_2s, test_ready)
                 all_tput_results[eval_tgt] = r
                 print(f"  [{eval_tgt}] acc={r['accuracy']:.3f} "
-                      f"f1={r['f1']:.3f} log_loss={r['log_loss']:.4f}")
+                      f"f1={r['f1']:.3f} prec={r['precision']:.3f} "
+                      f"rec={r['recall']:.3f} log_loss={r['log_loss']:.4f}")
             except Exception as e:
                 print(f"  [{eval_tgt}] eval failed: {e}")
                 all_tput_results[eval_tgt] = None
@@ -752,8 +726,8 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins):
 
     return (
         res, cols_used, model_2s,
-        persistence_acc, persistence_f1,
-        ar_acc, ar_f1, ar_log_loss,
+        persistence_acc, persistence_f1, persistence_precision, persistence_recall,
+        ar_acc, ar_f1, ar_precision, ar_recall, ar_log_loss,
         mb_size, mb_fallback,
         train_time_sec, eval_time_sec,
         all_tput_results,
@@ -806,7 +780,9 @@ def main():
                                 (
                                     res, cols, model_2s,
                                     persistence_acc, persistence_f1,
-                                    ar_acc, ar_f1, ar_log_loss,
+                                    persistence_precision, persistence_recall,
+                                    ar_acc, ar_f1, ar_precision,
+                                    ar_recall, ar_log_loss,
                                     mb_size, mb_fallback,
                                     train_time_sec, eval_time_sec,
                                     all_tput_results,
@@ -824,13 +800,19 @@ def main():
                                     # Learned DBN metrics
                                     "accuracy":                  res["accuracy"],
                                     "f1":                        res["f1"],
+                                    "precision":                 res["precision"],
+                                    "recall":                    res["recall"],
                                     "log_loss":                  res["log_loss"],
-                                    # Persistence baseline (no log_loss — no probabilities)
+                                    # Persistence baseline
                                     "persistence_accuracy":      persistence_acc,
                                     "persistence_f1":            persistence_f1,
+                                    "persistence_precision":     persistence_precision,
+                                    "persistence_recall":        persistence_recall,
                                     # Autoregressive DBN baseline
                                     "ar_dbn_accuracy":           ar_acc,
                                     "ar_dbn_f1":                 ar_f1,
+                                    "ar_dbn_precision":          ar_precision,
+                                    "ar_dbn_recall":             ar_recall,
                                     "ar_dbn_log_loss":           ar_log_loss,
                                     # Config
                                     "n_features_incl_target":    len(cols),
@@ -848,15 +830,21 @@ def main():
                                     "modeling_granularity_sec":  MODELING_GRANULARITY_SEC,
                                     "error":                     None,
                                     # Per-throughput breakdown
-                                    "acc_tput1":  all_tput_results.get("throughput_1", {}).get("accuracy", np.nan) if all_tput_results.get("throughput_1") else np.nan,
-                                    "acc_tput2":  all_tput_results.get("throughput_2", {}).get("accuracy", np.nan) if all_tput_results.get("throughput_2") else np.nan,
-                                    "acc_tput3":  all_tput_results.get("throughput_3", {}).get("accuracy", np.nan) if all_tput_results.get("throughput_3") else np.nan,
-                                    "f1_tput1":   all_tput_results.get("throughput_1", {}).get("f1", np.nan) if all_tput_results.get("throughput_1") else np.nan,
-                                    "f1_tput2":   all_tput_results.get("throughput_2", {}).get("f1", np.nan) if all_tput_results.get("throughput_2") else np.nan,
-                                    "f1_tput3":   all_tput_results.get("throughput_3", {}).get("f1", np.nan) if all_tput_results.get("throughput_3") else np.nan,
-                                    "ll_tput1":   all_tput_results.get("throughput_1", {}).get("log_loss", np.nan) if all_tput_results.get("throughput_1") else np.nan,
-                                    "ll_tput2":   all_tput_results.get("throughput_2", {}).get("log_loss", np.nan) if all_tput_results.get("throughput_2") else np.nan,
-                                    "ll_tput3":   all_tput_results.get("throughput_3", {}).get("log_loss", np.nan) if all_tput_results.get("throughput_3") else np.nan,
+                                    "acc_tput1":   all_tput_results.get("throughput_1", {}).get("accuracy",  np.nan) if all_tput_results.get("throughput_1") else np.nan,
+                                    "acc_tput2":   all_tput_results.get("throughput_2", {}).get("accuracy",  np.nan) if all_tput_results.get("throughput_2") else np.nan,
+                                    "acc_tput3":   all_tput_results.get("throughput_3", {}).get("accuracy",  np.nan) if all_tput_results.get("throughput_3") else np.nan,
+                                    "f1_tput1":    all_tput_results.get("throughput_1", {}).get("f1",        np.nan) if all_tput_results.get("throughput_1") else np.nan,
+                                    "f1_tput2":    all_tput_results.get("throughput_2", {}).get("f1",        np.nan) if all_tput_results.get("throughput_2") else np.nan,
+                                    "f1_tput3":    all_tput_results.get("throughput_3", {}).get("f1",        np.nan) if all_tput_results.get("throughput_3") else np.nan,
+                                    "prec_tput1":  all_tput_results.get("throughput_1", {}).get("precision", np.nan) if all_tput_results.get("throughput_1") else np.nan,
+                                    "prec_tput2":  all_tput_results.get("throughput_2", {}).get("precision", np.nan) if all_tput_results.get("throughput_2") else np.nan,
+                                    "prec_tput3":  all_tput_results.get("throughput_3", {}).get("precision", np.nan) if all_tput_results.get("throughput_3") else np.nan,
+                                    "rec_tput1":   all_tput_results.get("throughput_1", {}).get("recall",    np.nan) if all_tput_results.get("throughput_1") else np.nan,
+                                    "rec_tput2":   all_tput_results.get("throughput_2", {}).get("recall",    np.nan) if all_tput_results.get("throughput_2") else np.nan,
+                                    "rec_tput3":   all_tput_results.get("throughput_3", {}).get("recall",    np.nan) if all_tput_results.get("throughput_3") else np.nan,
+                                    "ll_tput1":    all_tput_results.get("throughput_1", {}).get("log_loss",  np.nan) if all_tput_results.get("throughput_1") else np.nan,
+                                    "ll_tput2":    all_tput_results.get("throughput_2", {}).get("log_loss",  np.nan) if all_tput_results.get("throughput_2") else np.nan,
+                                    "ll_tput3":    all_tput_results.get("throughput_3", {}).get("log_loss",  np.nan) if all_tput_results.get("throughput_3") else np.nan,
                                 }
 
                                 row = tracker.offer(
@@ -875,6 +863,8 @@ def main():
                                     f"eval={eval_time_sec:.1f}s) "
                                     f"| acc={res['accuracy']:.3f} "
                                     f"| f1={res['f1']:.3f} "
+                                    f"| prec={res['precision']:.3f} "
+                                    f"| rec={res['recall']:.3f} "
                                     f"| log_loss={res['log_loss']:.4f} "
                                     f"| pers_acc={persistence_acc:.3f} "
                                     f"| ar_acc={ar_acc:.3f} "
@@ -898,11 +888,17 @@ def main():
                                     "score":                     sc,
                                     "accuracy":                  np.nan,
                                     "f1":                        np.nan,
+                                    "precision":                 np.nan,
+                                    "recall":                    np.nan,
                                     "log_loss":                  np.nan,
                                     "persistence_accuracy":      np.nan,
                                     "persistence_f1":            np.nan,
+                                    "persistence_precision":     np.nan,
+                                    "persistence_recall":        np.nan,
                                     "ar_dbn_accuracy":           np.nan,
                                     "ar_dbn_f1":                 np.nan,
+                                    "ar_dbn_precision":          np.nan,
+                                    "ar_dbn_recall":             np.nan,
                                     "ar_dbn_log_loss":           np.nan,
                                     "n_features_incl_target":    np.nan,
                                     "features":                  None,
@@ -918,15 +914,11 @@ def main():
                                     "exclude_other_throughputs": EXCLUDE_OTHER_THROUGHPUTS,
                                     "modeling_granularity_sec":  MODELING_GRANULARITY_SEC,
                                     "error":                     str(e),
-                                    "acc_tput1":  np.nan,
-                                    "acc_tput2":  np.nan,
-                                    "acc_tput3":  np.nan,
-                                    "f1_tput1":   np.nan,
-                                    "f1_tput2":   np.nan,
-                                    "f1_tput3":   np.nan,
-                                    "ll_tput1":   np.nan,
-                                    "ll_tput2":   np.nan,
-                                    "ll_tput3":   np.nan,
+                                    "acc_tput1":  np.nan, "acc_tput2":  np.nan, "acc_tput3":  np.nan,
+                                    "f1_tput1":   np.nan, "f1_tput2":   np.nan, "f1_tput3":   np.nan,
+                                    "prec_tput1": np.nan, "prec_tput2": np.nan, "prec_tput3": np.nan,
+                                    "rec_tput1":  np.nan, "rec_tput2":  np.nan, "rec_tput3":  np.nan,
+                                    "ll_tput1":   np.nan, "ll_tput2":   np.nan, "ll_tput3":   np.nan,
                                 })
                                 print(
                                     f"[FAIL] target={TARGET} K={k} n_bins={n_bins} "
@@ -947,7 +939,7 @@ def main():
             print(
                 out_sorted.head(50)[[
                     "target", "K", "n_bins", "fs", "disc", "score",
-                    "accuracy", "f1", "log_loss",
+                    "accuracy", "f1", "precision", "recall", "log_loss",
                     "persistence_accuracy", "persistence_f1",
                     "ar_dbn_accuracy", "ar_dbn_f1", "ar_dbn_log_loss",
                     "n_features_incl_target", "mb_size", "mb_fallback",
