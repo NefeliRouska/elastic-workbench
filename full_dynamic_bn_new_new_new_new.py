@@ -20,18 +20,18 @@ HC_USE_CACHE   = True
 # ============================================================
 class AicScoreCustom(StructureScore):
     """
-    Discrete AIC score: maximize LL - k
-    Equivalent to minimising AIC = -2LL + 2k.
+    Discrete AIC score: maximize LL - k.
+    Equivalent to minimizing AIC = -2LL + 2k.
     """
 
     def __init__(self, data):
         super().__init__(data)
-        self.data        = data
+        self.data = data
         self.state_names = {c: sorted(data[c].unique()) for c in data.columns}
-        self.card        = {c: len(self.state_names[c]) for c in data.columns}
+        self.card = {c: len(self.state_names[c]) for c in data.columns}
 
     def local_score(self, variable, parents):
-        df  = self.data
+        df = self.data
         r_i = self.card[variable]
 
         if not parents:
@@ -42,22 +42,24 @@ class AicScoreCustom(StructureScore):
                 .to_numpy()
             )
             total = counts.sum()
+
             with np.errstate(divide="ignore", invalid="ignore"):
-                p  = counts / total if total > 0 else np.zeros_like(counts, dtype=float)
+                p = counts / total if total > 0 else np.zeros_like(counts, dtype=float)
                 ll = np.nansum(counts * np.log(p, where=(p > 0)))
+
             return float(ll - (r_i - 1))
 
         group_cols = list(parents) + [variable]
-        ct        = df.groupby(group_cols).size().reset_index(name="n")
+        ct = df.groupby(group_cols).size().reset_index(name="n")
         pa_counts = ct.groupby(list(parents))["n"].sum().reset_index(name="n_pa")
-        merged    = ct.merge(pa_counts, on=list(parents), how="left")
+        merged = ct.merge(pa_counts, on=list(parents), how="left")
 
-        n    = merged["n"].to_numpy(dtype=float)
+        n = merged["n"].to_numpy(dtype=float)
         n_pa = merged["n_pa"].to_numpy(dtype=float)
 
         with np.errstate(divide="ignore", invalid="ignore"):
             frac = n / n_pa
-            ll   = np.nansum(n * np.log(frac, where=(frac > 0)))
+            ll = np.nansum(n * np.log(frac, where=(frac > 0)))
 
         q_i = 1
         for p in parents:
@@ -68,80 +70,104 @@ class AicScoreCustom(StructureScore):
 
 def make_score(score_name: str, df: pd.DataFrame):
     score_name = score_name.lower().strip()
+
     if score_name == "bic":
         return BicScore(df)
+
     if score_name == "aic":
         return AicScoreCustom(df)
+
     raise ValueError("score_name must be 'bic' or 'aic'")
 
 
 # ============================================================
-# BLACKLIST  (domain causal ordering)
+# BLACKLIST: DOMAIN CAUSAL ORDERING
 # ============================================================
 def build_blacklist(df):
     """
-    Encodes the system's causal ordering as forbidden edges.
+    Encodes domain causal ordering as forbidden edges.
 
-    Layer 0 — control parameters  (cores_, data_quality_):
-        Set exogenously by the autoscaler. Nothing in the system
-        causes them to change. No incoming edges allowed.
+    Layer 0: control parameters
+      cores_, data_quality_
 
-    Layer 1 — container resource metrics:
-        Intermediate consequences of resource allocation.
+    Layer 1: container resource metrics
+      container_cpu_, container_memory_, container_network_,
+      container_fs_, container_blkio_
 
-    Layer 2 — performance outcomes
-        (throughput_, avg_p_latency_, buffer_size_):
-        Terminal effects of resource consumption.
+    Layer 2: performance outcomes
+      throughput_, avg_p_latency_, buffer_size_
 
-    Layer 3 — failure / error indicators:
-        Downstream consequences only.
+    Layer 3: failure/error indicators
+      fail, oom, scrape_error
 
-    Justification: this ordering follows directly from the
-    elastic-workbench architecture [Sedlak et al. 2025] and
-    established performance-modelling conventions [Brosig et al. 2012].
-    Encoding it as a blacklist is standard practice when domain
-    knowledge is available [Koller & Friedman 2009,
-    de Campos & Castellano 2007].
-
-    Note: reverse pipeline edges (e.g. throughput_3_t -> throughput_2_t1)
-    are intentionally NOT blacklisted. They capture backpressure dynamics
-    where downstream congestion propagates upstream — a real causal
-    mechanism in pipeline systems.
+    Rules:
+      - Layer 0 has no incoming edges.
+      - Later layers cannot cause earlier layers.
+      - Reverse inter-slice throughput edges are not blacklisted here,
+        because they may represent backpressure.
     """
     all_vars = list(df.columns)
 
     def has_prefix(c, prefixes):
-        return any(c.lower().startswith(p) for p in prefixes)
+        c = c.lower()
+        return any(c.startswith(p) for p in prefixes)
 
     def has_substring(c, subs):
-        return any(s in c.lower() for s in subs)
+        c = c.lower()
+        return any(s in c for s in subs)
 
-    layer0 = [v for v in all_vars if has_prefix(v, ["cores_", "data_quality_"])]
-    layer1 = [v for v in all_vars if has_prefix(
-        v, ["container_cpu_", "container_memory_", "container_network_",
-            "container_fs_", "container_blkio_"])]
-    layer2 = [v for v in all_vars if has_prefix(
-        v, ["throughput_", "avg_p_latency_", "buffer_size_"])]
-    layer3 = [v for v in all_vars if has_substring(
-        v, ["fail", "oom", "scrape_error"])]
+    layer0 = [
+        v for v in all_vars
+        if has_prefix(v, ["cores_", "data_quality_"])
+    ]
 
-    layers      = [layer0, layer1, layer2, layer3]
-    layer_index = {v: i for i, L in enumerate(layers) for v in L}
+    layer1 = [
+        v for v in all_vars
+        if has_prefix(
+            v,
+            [
+                "container_cpu_",
+                "container_memory_",
+                "container_network_",
+                "container_fs_",
+                "container_blkio_",
+            ],
+        )
+    ]
+
+    layer2 = [
+        v for v in all_vars
+        if has_prefix(v, ["throughput_", "avg_p_latency_", "buffer_size_"])
+    ]
+
+    layer3 = [
+        v for v in all_vars
+        if has_substring(v, ["fail", "oom", "scrape_error"])
+    ]
+
+    layers = [layer0, layer1, layer2, layer3]
+    layer_index = {v: i for i, layer in enumerate(layers) for v in layer}
 
     black = []
 
+    # Layer 0 variables are exogenous: no incoming edges.
     for child in layer0:
         for parent in all_vars:
             if parent != child:
                 black.append((parent, child))
 
-    for p in all_vars:
-        for c in all_vars:
-            if p == c:
+    # Forbid later-layer variables causing earlier-layer variables.
+    for parent in all_vars:
+        for child in all_vars:
+            if parent == child:
                 continue
-            if (p in layer_index and c in layer_index
-                    and layer_index[p] > layer_index[c]):
-                black.append((p, c))
+
+            if (
+                parent in layer_index
+                and child in layer_index
+                and layer_index[parent] > layer_index[child]
+            ):
+                black.append((parent, child))
 
     return black
 
@@ -160,22 +186,20 @@ def learn_intra_edges(
 ):
     """
     Learn within-slice dependencies from single-slice data.
-    Uses hill-climbing with the domain blacklist.
-
-    Note: hill climbing is a greedy local search and may converge
-    to a local optimum [Chickering 2002].
     """
-    bl  = build_blacklist(df)
+    blacklist = build_blacklist(df)
+
     est = HillClimbSearch(df, use_cache=use_cache)
     best = est.estimate(
         scoring_method=make_score(score_name, df),
         max_indegree=max_indegree,
-        black_list=bl,
+        black_list=blacklist,
         max_iter=max_iter,
         tabu_length=tabu_length,
         epsilon=epsilon,
         show_progress=False,
     )
+
     return list(best.edges())
 
 
@@ -185,19 +209,25 @@ def learn_intra_edges(
 def build_inter_only_blacklist(nodes):
     """
     Only allow edges of the form X_t -> Y_t1.
-    Block all intra-t, intra-t1, and backward t1->t edges.
 
-    Note: reverse pipeline edges (throughput_3_t -> throughput_2_t1 etc.)
-    are allowed — they capture backpressure dynamics.
+    Forbid:
+      - intra-t edges during inter-edge learning
+      - intra-t1 edges during inter-edge learning
+      - backward t1 -> t edges
+
+    Self-transition edges X_t -> X_t1 are allowed.
     """
     black = []
+
     for a in nodes:
         for b in nodes:
             if a == b:
                 continue
-            black.append((f"{a}_t",  f"{b}_t"))
+
+            black.append((f"{a}_t", f"{b}_t"))
             black.append((f"{a}_t1", f"{b}_t1"))
             black.append((f"{a}_t1", f"{b}_t"))
+
     return black
 
 
@@ -210,24 +240,31 @@ def learn_inter_edges_only(
     epsilon=HC_EPSILON,
     use_cache=HC_USE_CACHE,
 ):
+    """
+    Learn inter-slice edges X_t -> Y_t1 from shifted two-slice data.
+    """
     nodes = list(df.columns)
-    df_t  = df.iloc[:-1].reset_index(drop=True).add_suffix("_t")
+
+    df_t = df.iloc[:-1].reset_index(drop=True).add_suffix("_t")
     df_t1 = df.iloc[1:].reset_index(drop=True).add_suffix("_t1")
     df_2s = pd.concat([df_t, df_t1], axis=1)
 
-    black = build_inter_only_blacklist(nodes)
-    est   = HillClimbSearch(df_2s, use_cache=use_cache)
-    best  = est.estimate(
+    blacklist = build_inter_only_blacklist(nodes)
+
+    est = HillClimbSearch(df_2s, use_cache=use_cache)
+    best = est.estimate(
         scoring_method=make_score(score_name, df_2s),
         max_indegree=max_indegree,
-        black_list=black,
+        black_list=blacklist,
         max_iter=max_iter,
         tabu_length=tabu_length,
         epsilon=epsilon,
         show_progress=False,
     )
+
     return [
-        (u, v) for (u, v) in best.edges()
+        (u, v)
+        for (u, v) in best.edges()
         if u.endswith("_t") and v.endswith("_t1")
     ]
 
@@ -237,52 +274,39 @@ def learn_inter_edges_only(
 # ============================================================
 def fit_consistent_2slice_bn(df, intra_edges, inter_edges):
     """
-    Build and fit the formal 2-slice DBN.
+    Build and fit a two-slice DBN.
 
-    Structure
-    ---------
-    A proper 2-slice DBN has three edge sets:
-      1. intra_t  : X_t  -> Y_t   (within-slice at t)
-      2. intra_t1 : X_t1 -> Y_t1  (same structure at t1, stationarity)
-      3. inter    : X_t  -> Y_t1  (temporal transition dynamics)
+    Structure:
+      1. intra_t  : X_t  -> Y_t
+      2. intra_t1 : X_t1 -> Y_t1
+      3. inter    : X_t  -> Y_t1
 
-    CPD fitting
-    -----------
-    Explicit state_names are passed to pgmpy to prevent state mismatch
-    when a bin value appears in the test set but not in training.
-    State space is declared as range(0, max_bin+1) per variable.
-
-    Intra CPDs are re-fitted from single-slice data to avoid
-    conflation with inter-slice parent signals.
-    State space is validated before replacing any CPD to prevent
-    the 'CPD does not have proper parents' crash.
+    Important:
+      CPDs are fitted once from the full two-slice dataframe.
+      We do NOT refit intra CPDs separately, because t1 nodes may have
+      both intra-slice parents and inter-slice parents. Replacing their
+      CPDs with intra-only CPDs would make the CPD parent sets inconsistent
+      with the graph.
     """
-    intra_t  = [(f"{u}_t",  f"{v}_t")  for (u, v) in intra_edges]
+    intra_t = [(f"{u}_t", f"{v}_t") for (u, v) in intra_edges]
     intra_t1 = [(f"{u}_t1", f"{v}_t1") for (u, v) in intra_edges]
+
     edges_2s = intra_t + intra_t1 + inter_edges
 
-    df_t  = df.iloc[:-1].reset_index(drop=True).add_suffix("_t")
+    df_t = df.iloc[:-1].reset_index(drop=True).add_suffix("_t")
     df_t1 = df.iloc[1:].reset_index(drop=True).add_suffix("_t1")
     df_2s = pd.concat([df_t, df_t1], axis=1)
 
-    df_single_t  = df.add_suffix("_t")
-    df_single_t1 = df.add_suffix("_t1")
-
     model_2s = BayesianNetwork(edges_2s)
 
-    # Build explicit state_names for all two-slice variables.
-    # Using max+1 range ensures all possible bin values are declared
-    # even if some bins are absent from training — prevents pgmpy
-    # state mismatch during inference on test data.
-    nodes = list(df.columns)
+    # Explicit state names prevent silent state-order or missing-bin issues.
     state_names_2s = {}
-    for v in nodes:
+    for v in df.columns:
         max_val = int(df[v].max())
-        states  = list(range(max_val + 1))
-        state_names_2s[f"{v}_t"]  = states
+        states = list(range(max_val + 1))
+        state_names_2s[f"{v}_t"] = states
         state_names_2s[f"{v}_t1"] = states
 
-    # Step 1: fit everything from df_2s as baseline
     model_2s.fit(
         df_2s,
         estimator=BayesianEstimator,
@@ -290,83 +314,6 @@ def fit_consistent_2slice_bn(df, intra_edges, inter_edges):
         equivalent_sample_size=10,
         state_names=state_names_2s,
     )
-
-    # Step 2: re-fit intra nodes from single-slice data only
-    intra_children_t  = list({v for (_, v) in intra_t})
-    intra_children_t1 = list({v for (_, v) in intra_t1})
-
-    def refit_intra_node(node, df_single, suffix, all_edges):
-        parents_intra = [
-            p for (p, c) in all_edges
-            if c == node and p.endswith(suffix)
-        ]
-        if not parents_intra:
-            return
-
-        cols_available = [
-            c for c in parents_intra + [node]
-            if c in df_single.columns
-        ]
-        if node not in cols_available:
-            return
-
-        tiny_edges = [
-            (p, node) for p in parents_intra
-            if p in cols_available
-        ]
-        if not tiny_edges:
-            return
-
-        sub = df_single[cols_available].copy()
-
-        try:
-            existing_cpd = model_2s.get_cpds(node)
-        except Exception:
-            return
-
-        if existing_cpd is None:
-            return
-
-        expected_states = set(existing_cpd.state_names[node])
-        actual_states   = set(sub[node].unique())
-
-        if not actual_states.issubset(expected_states):
-            return
-
-        # Pass state_names to tiny model too for consistency
-        tiny_state_names = {
-            c: state_names_2s.get(c, list(range(int(sub[c].max()) + 1)))
-            for c in cols_available
-        }
-        tiny_model = BayesianNetwork(tiny_edges)
-        try:
-            tiny_model.fit(
-                sub,
-                estimator=BayesianEstimator,
-                prior_type="BDeu",
-                equivalent_sample_size=10,
-                state_names=tiny_state_names,
-            )
-            new_cpd = tiny_model.get_cpds(node)
-
-            if new_cpd is None:
-                return
-            if set(new_cpd.state_names[node]) != expected_states:
-                return
-
-            model_2s.cpds = [
-                cpd for cpd in model_2s.cpds
-                if cpd.variable != node
-            ]
-            model_2s.add_cpds(new_cpd)
-
-        except Exception:
-            pass
-
-    for node in intra_children_t:
-        refit_intra_node(node, df_single_t,  "_t",  edges_2s)
-    for node in intra_children_t1:
-        refit_intra_node(node, df_single_t1, "_t1", edges_2s)
 
     return model_2s, edges_2s
 
@@ -384,12 +331,25 @@ def build_dbn_model_2s(
     use_cache=HC_USE_CACHE,
 ):
     intra = learn_intra_edges(
-        df_ready, score_name, max_indegree, max_iter,
-        tabu_length, epsilon, use_cache
+        df_ready,
+        score_name=score_name,
+        max_indegree=max_indegree,
+        max_iter=max_iter,
+        tabu_length=tabu_length,
+        epsilon=epsilon,
+        use_cache=use_cache,
     )
+
     inter = learn_inter_edges_only(
-        df_ready, score_name, max_indegree, max_iter,
-        tabu_length, epsilon, use_cache
+        df_ready,
+        score_name=score_name,
+        max_indegree=max_indegree,
+        max_iter=max_iter,
+        tabu_length=tabu_length,
+        epsilon=epsilon,
+        use_cache=use_cache,
     )
+
     model_2s, edges = fit_consistent_2slice_bn(df_ready, intra, inter)
+
     return model_2s, edges, intra, inter
