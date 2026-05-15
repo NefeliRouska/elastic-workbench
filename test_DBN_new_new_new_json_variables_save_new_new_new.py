@@ -35,12 +35,12 @@ CSV_PATH = args.csv
 TRAIN_FRAC = 0.8
 TARGETS    = ["throughput_3"]
 
-K_VALUES                  = [8, 12, 20]
+K_VALUES                  = [4, 8, 12, 16, 20]
 FEATURE_SELECTION_METHODS = ["markov", "mrmr"]
 DISCRETIZATION_METHODS    = ["classic_uniform", "classic_quantile", "kmeans"]
 SCORES                    = ["bic", "aic"]
 
-N_BINS_VALUES      = [2, 3, 4, 5, 6, 8]
+N_BINS_VALUES      = [2, 3, 4, 6, 8, 10]
 DBSCAN_EPS         = 0.30
 DBSCAN_MIN_SAMPLES = 10
 
@@ -51,7 +51,7 @@ EVIDENCE_SUBSET = ["avg_p_latency_", "cores_", "data_quality_", "buffer_size_"]
 
 EXCLUDE_OTHER_THROUGHPUTS = False
 
-TOP_N_MODELS_TO_SAVE = 5
+# TOP_N_MODELS_TO_SAVE removed — using BestPerBinsTracker (best per n_bins)
 
 _timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 _stem = Path(CSV_PATH).stem.replace("dbn_wide_", "") + f"_run{_timestamp}"
@@ -421,11 +421,19 @@ def save_dbn_model(model_2s, target, k, fs_method, disc_method,
     return pkl_path, edges_path
 
 
-class TopNModelTracker:
-    def __init__(self, n, target):
-        self.n        = n
+class BestPerBinsTracker:
+    """
+    Saves the best model (by accuracy) for each distinct n_bins value.
+    Produces one saved model per bin count, allowing direct comparison
+    of causal structure and performance across discretization granularities.
+
+    Replaces the old TopNModelTracker which saved top-N globally —
+    that approach always saved bins=2 models since they dominate accuracy.
+    """
+
+    def __init__(self, target):
         self.target   = target
-        self.heap     = []
+        self.best     = {}   # n_bins -> (accuracy, counter, row_dict, model, k, fs, disc, sc)
         self._counter = 0
 
     def offer(self, accuracy, row_dict, model_2s,
@@ -433,43 +441,60 @@ class TopNModelTracker:
         if np.isnan(accuracy):
             return row_dict
 
-        entry = (accuracy, self._counter, row_dict, model_2s,
-                 k, fs_method, disc_method, score_name, n_bins)
         self._counter += 1
+        key = n_bins  # track best per n_bins value
 
-        if len(self.heap) < self.n:
-            heapq.heappush(self.heap, entry)
-            self._save_all()
-        elif accuracy > self.heap[0][0]:
-            evicted = heapq.heapreplace(self.heap, entry)
-            self._delete_saved(evicted)
-            self._save_all()
+        if key not in self.best or accuracy > self.best[key][0]:
+            # Evict old saved files for this n_bins if they exist
+            if key in self.best:
+                self._delete_saved(self.best[key][2])
+            self.best[key] = (accuracy, self._counter, row_dict,
+                              model_2s, k, fs_method, disc_method,
+                              score_name, n_bins)
+            self._save_bin(key)
 
-        for _, _, rd, _, _, _, _, _, _ in self.heap:
-            if rd is row_dict:
-                return rd
+        # Return row_dict (may have been updated with paths)
+        if key in self.best and self.best[key][2] is row_dict:
+            return row_dict
         return row_dict
 
-    def _save_all(self):
+    def _save_bin(self, key):
+        """Save the current best model for a given n_bins value."""
+        acc, uid, rd, mdl, k, fs, disc, sc, nb = self.best[key]
+
+        # Clean up any existing file for this bins value
         if os.path.exists(MODEL_SAVE_DIR):
             for f in os.listdir(MODEL_SAVE_DIR):
-                if f.startswith("rank") and f"_{self.target}_" in f:
+                if (f"_{self.target}_" in f and
+                        f"_bins{nb}" in f and
+                        f.startswith("best_bins")):
                     try:
                         os.remove(os.path.join(MODEL_SAVE_DIR, f))
                     except OSError:
                         pass
 
-        sorted_entries = sorted(self.heap, key=lambda e: e[0], reverse=True)
-        for rank, (acc, uid, rd, mdl, k, fs, disc, sc, nb) in enumerate(
-                sorted_entries, start=1):
-            pkl, edges = save_dbn_model(
-                mdl, self.target, k, fs, disc, sc, nb, rank=rank
-            )
-            rd["model_pkl_path"]  = pkl
-            rd["edges_csv_path"]  = edges
+        # Save with prefix best_bins{nb}_ instead of rank{n}_
+        os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
+        model_base  = (f"best_bins{nb}_dbn_{self.target}_K{k}_{fs}_"
+                       f"{disc}_{sc}_bins{nb}")
+        pkl_path    = os.path.join(MODEL_SAVE_DIR, model_base + ".pkl")
+        edges_path  = os.path.join(MODEL_SAVE_DIR, model_base + "_edges.csv")
 
-    def _delete_saved(self, evicted_entry):
-        _, _, rd, _, _, _, _, _, _ = evicted_entry
+        with open(pkl_path, "wb") as f:
+            pickle.dump(mdl, f)
+        try:
+            with open(pkl_path, "rb") as f:
+                pickle.load(f)
+        except Exception as e:
+            raise RuntimeError(f"Saved model failed verification: {e}")
+
+        edges_df = pd.DataFrame(list(mdl.edges()), columns=["parent", "child"])
+        edges_df.to_csv(edges_path, index=False)
+
+        rd["model_pkl_path"] = pkl_path
+        rd["edges_csv_path"] = edges_path
+
+    def _delete_saved(self, rd):
         for key in ("model_pkl_path", "edges_csv_path"):
             path = rd.get(key)
             if path and os.path.exists(path):
@@ -477,6 +502,14 @@ class TopNModelTracker:
                     os.remove(path)
                 except OSError:
                     pass
+
+    def summary(self):
+        """Print summary of best model per n_bins."""
+        print(f"\n=== BEST MODEL PER N_BINS ({self.target}) ===")
+        for nb in sorted(self.best.keys()):
+            acc, _, _, _, k, fs, disc, sc, _ = self.best[nb]
+            print(f"  bins={nb}: acc={acc:.4f} K={k} fs={fs} "
+                  f"disc={disc} score={sc}")
 
 
 # ============================================================
@@ -908,7 +941,7 @@ def main():
 
         print(f"[DATA] rows after aggregation: {len(raw)}")
 
-        tracker = TopNModelTracker(n=TOP_N_MODELS_TO_SAVE, target=TARGET)
+        tracker = BestPerBinsTracker(target=TARGET)
         rows    = []
 
         for k in K_VALUES:
@@ -1092,6 +1125,8 @@ def main():
                                     f"time={elapsed:.2f}s: {e}"
                                 )
                                 gc.collect()
+
+        tracker.summary()
 
         out = pd.DataFrame(rows)
 
