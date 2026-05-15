@@ -102,6 +102,11 @@ def build_blacklist(df):
     Encoding it as a blacklist is standard practice when domain
     knowledge is available [Koller & Friedman 2009,
     de Campos & Castellano 2007].
+
+    Note: reverse pipeline edges (e.g. throughput_3_t -> throughput_2_t1)
+    are intentionally NOT blacklisted. They capture backpressure dynamics
+    where downstream congestion propagates upstream — a real causal
+    mechanism in pipeline systems.
     """
     all_vars = list(df.columns)
 
@@ -181,6 +186,9 @@ def build_inter_only_blacklist(nodes):
     """
     Only allow edges of the form X_t -> Y_t1.
     Block all intra-t, intra-t1, and backward t1->t edges.
+
+    Note: reverse pipeline edges (throughput_3_t -> throughput_2_t1 etc.)
+    are allowed — they capture backpressure dynamics.
     """
     black = []
     for a in nodes:
@@ -240,6 +248,10 @@ def fit_consistent_2slice_bn(df, intra_edges, inter_edges):
 
     CPD fitting
     -----------
+    Explicit state_names are passed to pgmpy to prevent state mismatch
+    when a bin value appears in the test set but not in training.
+    State space is declared as range(0, max_bin+1) per variable.
+
     Intra CPDs are re-fitted from single-slice data to avoid
     conflation with inter-slice parent signals.
     State space is validated before replacing any CPD to prevent
@@ -258,12 +270,25 @@ def fit_consistent_2slice_bn(df, intra_edges, inter_edges):
 
     model_2s = BayesianNetwork(edges_2s)
 
+    # Build explicit state_names for all two-slice variables.
+    # Using max+1 range ensures all possible bin values are declared
+    # even if some bins are absent from training — prevents pgmpy
+    # state mismatch during inference on test data.
+    nodes = list(df.columns)
+    state_names_2s = {}
+    for v in nodes:
+        max_val = int(df[v].max())
+        states  = list(range(max_val + 1))
+        state_names_2s[f"{v}_t"]  = states
+        state_names_2s[f"{v}_t1"] = states
+
     # Step 1: fit everything from df_2s as baseline
     model_2s.fit(
         df_2s,
         estimator=BayesianEstimator,
         prior_type="BDeu",
         equivalent_sample_size=10,
+        state_names=state_names_2s,
     )
 
     # Step 2: re-fit intra nodes from single-slice data only
@@ -308,6 +333,11 @@ def fit_consistent_2slice_bn(df, intra_edges, inter_edges):
         if not actual_states.issubset(expected_states):
             return
 
+        # Pass state_names to tiny model too for consistency
+        tiny_state_names = {
+            c: state_names_2s.get(c, list(range(int(sub[c].max()) + 1)))
+            for c in cols_available
+        }
         tiny_model = BayesianNetwork(tiny_edges)
         try:
             tiny_model.fit(
@@ -315,6 +345,7 @@ def fit_consistent_2slice_bn(df, intra_edges, inter_edges):
                 estimator=BayesianEstimator,
                 prior_type="BDeu",
                 equivalent_sample_size=10,
+                state_names=tiny_state_names,
             )
             new_cpd = tiny_model.get_cpds(node)
 

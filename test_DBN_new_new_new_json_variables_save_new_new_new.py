@@ -15,7 +15,7 @@ from sklearn.metrics import f1_score, log_loss, precision_score, recall_score
 from pgmpy.inference import VariableElimination
 from pgmpy.estimators import HillClimbSearch, BayesianEstimator
 from pgmpy.models import BayesianNetwork
-from full_dynamic_bn_new_new_new import build_dbn_model_2s, make_score
+from full_dynamic_bn_new_new_new_new import build_dbn_model_2s, make_score
 from pathlib import Path
 import argparse
 
@@ -577,6 +577,13 @@ def evaluate(model_2s, test_df):
     except Exception:
         n_classes = None
 
+    # Read state names early so pred label mapping is available in loop
+    try:
+        target_states_eval = model_2s.get_cpds(target_t1_node).state_names[target_t1_node]
+        labels_eval        = [int(s) for s in target_states_eval]
+    except Exception:
+        labels_eval = list(range(n_classes)) if n_classes is not None else None
+
     correct         = 0
     y_true_list     = []
     y_pred_list     = []
@@ -598,11 +605,18 @@ def evaluate(model_2s, test_df):
             probs = q.values / q.values.sum()
             inference_cache[evidence_key] = probs
 
-        pred = int(np.argmax(probs))
+        # Map argmax index to actual class label using state_names
+        # This is safe even if pgmpy reorders states
+        pred_idx = int(np.argmax(probs))
 
         y_true_list.append(true_next)
-        y_pred_list.append(pred)
         y_prob_list.append(probs)
+
+        if labels_eval is not None and pred_idx < len(labels_eval):
+            pred = labels_eval[pred_idx]
+        else:
+            pred = pred_idx
+        y_pred_list.append(pred)
 
         if pred == true_next:
             correct += 1
@@ -619,8 +633,9 @@ def evaluate(model_2s, test_df):
     recall    = float(recall_score(y_true_arr, y_pred_arr,
                                    average="macro", zero_division=0))
 
-    if n_classes is not None:
-        labels = list(range(n_classes))
+    # Use labels_eval already computed above for log loss alignment
+    if labels_eval is not None:
+        labels = labels_eval
     else:
         labels = sorted(list(set(y_true_list)))
 
@@ -665,11 +680,27 @@ def autoregressive_dbn_baseline(train_ready, test_ready):
     df_2s = pd.concat([df_t, df_t1], axis=1)
 
     model = BayesianNetwork(edges)
+    # state_names covers all possible bins from both train and test
+    # to prevent pgmpy state mismatch — uses train_ready and test_ready
+    # via df_t/df_t1 which come from train only; we widen using test_ready
+    state_names_2s = {
+        f"{v}_t":  list(range(int(max(
+            df_t[f"{v}_t"].max(),
+            test_ready[v].max() if v in test_ready.columns else 0
+        )) + 1)) for v in nodes
+    }
+    state_names_2s.update({
+        f"{v}_t1": list(range(int(max(
+            df_t1[f"{v}_t1"].max(),
+            test_ready[v].max() if v in test_ready.columns else 0
+        )) + 1)) for v in nodes
+    })
     model.fit(
         df_2s,
         estimator=BayesianEstimator,
         prior_type="BDeu",
         equivalent_sample_size=10,
+        state_names=state_names_2s,
     )
 
     res = evaluate(model, test_ready)
@@ -682,23 +713,38 @@ def autoregressive_dbn_baseline(train_ready, test_ready):
 # ============================================================
 def static_bn_baseline(train_ready, test_ready, score_name):
     """
-    Static Bayesian Network baseline: learns cross-variable structure
-    from a single timeslice (no temporal dimension). Predicts
-    P(target | current evidence) directly without t -> t+1 propagation.
+    Static BN transition baseline: learns P(TARGET_t+1 | X_t) using a
+    flat Bayesian Network trained on a shifted dataset where features
+    are from time t and the target is from time t+1.
 
-    This isolates the contribution of the temporal component:
-    the gap between static BN and learned DBN shows what the
-    two-slice temporal structure adds beyond cross-variable edges alone.
+    This is a fair comparison with the learned DBN — same prediction
+    task (one-step-ahead), but without explicit temporal graph structure.
+    The gap between this and the learned DBN shows what the two-slice
+    temporal dynamics add beyond cross-variable regression alone.
 
     Reports: accuracy, f1, precision, recall, log_loss.
     """
-    # Drop constant columns
-    train_s = train_ready[[c for c in train_ready.columns
-                           if train_ready[c].nunique() > 1]].copy()
-    if TARGET not in train_s.columns:
-        train_s[TARGET] = train_ready[TARGET]
+    # Build shifted training dataset: X_t -> TARGET_t+1
+    # Features from rows 0..n-2, target from rows 1..n-1
+    X_train = train_ready.iloc[:-1].drop(columns=[TARGET]).reset_index(drop=True)
+    y_train = train_ready[TARGET].iloc[1:].reset_index(drop=True)
 
-    test_s = test_ready[train_s.columns].copy()
+    # Combine into one dataframe for BN fitting
+    train_s = X_train.copy()
+    train_s[TARGET] = y_train
+
+    # Drop constant columns
+    train_s = train_s[[c for c in train_s.columns
+                        if train_s[c].nunique() > 1]].copy()
+    if TARGET not in train_s.columns:
+        # If target became constant (very rare), return nan
+        return float("nan"), float("nan"), float("nan"), float("nan"), float("nan")
+
+    # Build test shifted dataset the same way
+    X_test = test_ready.iloc[:-1].drop(columns=[TARGET]).reset_index(drop=True)
+    y_test = test_ready[TARGET].iloc[1:].reset_index(drop=True)
+    test_s = X_test[[c for c in X_test.columns if c in train_s.columns]].copy()
+    test_s[TARGET] = y_test
 
     # Build blacklist for single slice
     bl  = _build_blacklist_single_slice(train_s)
@@ -712,29 +758,44 @@ def static_bn_baseline(train_ready, test_ready, score_name):
             show_progress=False,
         )
         model = BayesianNetwork(best.edges())
+        # state_names covers all possible bins from both train and test
+        # to prevent pgmpy state mismatch — does not leak test labels
+        state_names_s = {
+            c: list(range(int(max(train_s[c].max(),
+                                  test_s[c].max() if c in test_s.columns
+                                  else train_s[c].max())) + 1))
+            for c in train_s.columns
+        }
         model.fit(
             train_s,
             estimator=BayesianEstimator,
             prior_type="BDeu",
             equivalent_sample_size=10,
+            state_names=state_names_s,
         )
     except Exception as e:
         print(f"  [static BN] structure learning failed: {e}")
         return float("nan"), float("nan"), float("nan"), float("nan"), float("nan")
 
-    # Inference on test set (single slice — no t/t+1 suffix)
-    infer      = VariableElimination(model)
-    ev_cols    = [c for c in test_s.columns if c != TARGET
-                  and c in model.nodes()]
-    n          = len(test_s)
+    # Inference: test_s already has X_t as features and TARGET_t+1 as label
+    # (built with shifted dataset above) so we iterate directly
+    infer   = VariableElimination(model)
+    ev_cols = [c for c in test_s.columns if c != TARGET
+               and c in model.nodes()]
+    n       = len(test_s)
 
     if n <= 0 or TARGET not in model.nodes():
         return float("nan"), float("nan"), float("nan"), float("nan"), float("nan")
 
+    # Read state names explicitly from CPD for safe label alignment
     try:
-        n_classes = len(model.get_cpds(TARGET).state_names[TARGET])
+        target_states = model.get_cpds(TARGET).state_names[TARGET]
+        labels_sbn    = [int(s) for s in target_states]
+        n_classes     = len(labels_sbn)
     except Exception:
-        n_classes = None
+        target_states = None
+        labels_sbn    = None
+        n_classes     = None
 
     y_true_list, y_pred_list, y_prob_list = [], [], []
     inference_cache = {}
@@ -743,7 +804,7 @@ def static_bn_baseline(train_ready, test_ready, score_name):
         evidence     = {c: int(test_s.iloc[t][c]) for c in ev_cols
                         if not np.isnan(test_s.iloc[t][c])}
         evidence_key = tuple(sorted(evidence.items()))
-        true_val     = int(test_s.iloc[t][TARGET])
+        true_val     = int(test_s.iloc[t][TARGET])   # already t+1 label
 
         if evidence_key in inference_cache:
             probs = inference_cache[evidence_key]
@@ -759,7 +820,11 @@ def static_bn_baseline(train_ready, test_ready, score_name):
                     probs = np.array([0.5, 0.5])
             inference_cache[evidence_key] = probs
 
-        pred = int(np.argmax(probs))
+        # Map argmax index to actual class label
+        if labels_sbn is not None:
+            pred = labels_sbn[int(np.argmax(probs))]
+        else:
+            pred = int(np.argmax(probs))
         y_true_list.append(true_val)
         y_pred_list.append(pred)
         y_prob_list.append(probs)
@@ -776,7 +841,157 @@ def static_bn_baseline(train_ready, test_ready, score_name):
     recall    = float(recall_score(y_true_arr, y_pred_arr,
                                    average="macro", zero_division=0))
 
-    if n_classes is not None:
+    # Use explicit state names for label alignment — safer than assuming
+    # probabilities are ordered 0,1,2... especially with sparse bins
+    if target_states is not None:
+        labels = [int(s) for s in target_states]
+    elif n_classes is not None:
+        labels = list(range(n_classes))
+    else:
+        labels = sorted(list(set(y_true_list)))
+
+    if y_prob_arr.shape[1] < len(labels):
+        pad = np.zeros((y_prob_arr.shape[0], len(labels) - y_prob_arr.shape[1]))
+        y_prob_arr = np.hstack([y_prob_arr, pad])
+
+    eps        = 1e-12
+    y_prob_arr = np.clip(y_prob_arr, eps, 1.0)
+    y_prob_arr = y_prob_arr / y_prob_arr.sum(axis=1, keepdims=True)
+
+    ll = float(log_loss(y_true_arr, y_prob_arr, labels=labels))
+
+    return accuracy, f1, precision, recall, ll
+
+
+# ============================================================
+# STATIC BN INFERENCE BASELINE (same-time)
+# ============================================================
+def static_bn_inference_baseline(train_ready, test_ready, score_name):
+    """
+    Static BN inference baseline: replicates previous lab work.
+    Trains a BN on single-slice data and infers P(TARGET_t | X_t) —
+    same-timeslice inference, not prediction.
+
+    This is NOT a forecasting model — it answers "given the current
+    state of all other variables, what is throughput right now?"
+    It serves as a direct comparison to prior work that used static
+    BNs for system monitoring without temporal prediction.
+
+    Contrast with static_bn_baseline() which trains on shifted data
+    and predicts TARGET_t+1 from X_t (one-step-ahead, fair comparison
+    to the learned DBN).
+
+    Reports: accuracy, f1, precision, recall, log_loss.
+    Note: because this uses same-time evidence including variables
+    correlated with throughput at time t, accuracy will be higher
+    than the transition baselines — this is expected and should be
+    noted when reporting results.
+    """
+    # Drop constant columns
+    train_s = train_ready[[c for c in train_ready.columns
+                           if train_ready[c].nunique() > 1]].copy()
+    if TARGET not in train_s.columns:
+        return float("nan"), float("nan"), float("nan"), float("nan"), float("nan")
+
+    test_s = test_ready[[c for c in train_s.columns
+                         if c in test_ready.columns]].copy()
+
+    # Build blacklist for single slice
+    bl  = _build_blacklist_single_slice(train_s)
+    est = HillClimbSearch(train_s)
+
+    try:
+        best = est.estimate(
+            scoring_method=make_score(score_name, train_s),
+            black_list=bl,
+            max_iter=MB_QUICK_MAX_ITER,
+            show_progress=False,
+        )
+        model = BayesianNetwork(best.edges())
+        # state_names covers all possible bins from both train and test
+        state_names_s = {
+            c: list(range(int(max(
+                train_s[c].max(),
+                test_s[c].max() if c in test_s.columns else train_s[c].max()
+            )) + 1))
+            for c in train_s.columns
+        }
+        model.fit(
+            train_s,
+            estimator=BayesianEstimator,
+            prior_type="BDeu",
+            equivalent_sample_size=10,
+            state_names=state_names_s,
+        )
+    except Exception as e:
+        print(f"  [static BN inference] structure learning failed: {e}")
+        return float("nan"), float("nan"), float("nan"), float("nan"), float("nan")
+
+    # Inference on test set: infer TARGET_t from X_t (same timeslice)
+    infer   = VariableElimination(model)
+    ev_cols = [c for c in test_s.columns if c != TARGET
+               and c in model.nodes()]
+    n       = len(test_s)
+
+    if n <= 0 or TARGET not in model.nodes():
+        return float("nan"), float("nan"), float("nan"), float("nan"), float("nan")
+
+    try:
+        target_states = model.get_cpds(TARGET).state_names[TARGET]
+        labels_si     = [int(s) for s in target_states]
+        n_classes     = len(labels_si)
+    except Exception:
+        target_states = None
+        labels_si     = None
+        n_classes     = None
+
+    y_true_list, y_pred_list, y_prob_list = [], [], []
+    inference_cache = {}
+
+    for t in range(n):
+        evidence     = {c: int(test_s.iloc[t][c]) for c in ev_cols
+                        if not np.isnan(test_s.iloc[t][c])}
+        evidence_key = tuple(sorted(evidence.items()))
+        true_val     = int(test_s.iloc[t][TARGET])   # same-time label
+
+        if evidence_key in inference_cache:
+            probs = inference_cache[evidence_key]
+        else:
+            try:
+                q     = infer.query([TARGET], evidence=evidence,
+                                    show_progress=False)
+                probs = q.values / q.values.sum()
+            except Exception:
+                if n_classes is not None:
+                    probs = np.ones(n_classes) / n_classes
+                else:
+                    probs = np.array([0.5, 0.5])
+            inference_cache[evidence_key] = probs
+
+        if labels_si is not None and int(np.argmax(probs)) < len(labels_si):
+            pred = labels_si[int(np.argmax(probs))]
+        else:
+            pred = int(np.argmax(probs))
+
+        y_true_list.append(true_val)
+        y_pred_list.append(pred)
+        y_prob_list.append(probs)
+
+    y_true_arr = np.array(y_true_list)
+    y_pred_arr = np.array(y_pred_list)
+    y_prob_arr = np.array(y_prob_list)
+
+    accuracy  = float(np.mean(y_true_arr == y_pred_arr))
+    f1        = float(f1_score(y_true_arr, y_pred_arr,
+                               average="macro", zero_division=0))
+    precision = float(precision_score(y_true_arr, y_pred_arr,
+                                      average="macro", zero_division=0))
+    recall    = float(recall_score(y_true_arr, y_pred_arr,
+                                   average="macro", zero_division=0))
+
+    if target_states is not None:
+        labels = [int(s) for s in target_states]
+    elif n_classes is not None:
         labels = list(range(n_classes))
     else:
         labels = sorted(list(set(y_true_list)))
@@ -853,12 +1068,19 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins):
           f"prec={ar_precision:.3f} rec={ar_recall:.3f} "
           f"log_loss={ar_log_loss:.4f}")
 
-    # Static BN baseline
+    # Static BN transition baseline (X_t -> TARGET_t+1)
     (sbn_acc, sbn_f1, sbn_precision,
      sbn_recall, sbn_log_loss) = static_bn_baseline(train_ready, test_ready, score_name)
     print(f"Static BN    acc={sbn_acc:.3f} f1={sbn_f1:.3f} "
           f"prec={sbn_precision:.3f} rec={sbn_recall:.3f} "
           f"log_loss={sbn_log_loss:.4f}")
+
+    # Static BN inference baseline (X_t -> TARGET_t, replicates prior lab work)
+    (si_acc, si_f1, si_precision,
+     si_recall, si_log_loss) = static_bn_inference_baseline(train_ready, test_ready, score_name)
+    print(f"Static BN SI acc={si_acc:.3f} f1={si_f1:.3f} "
+          f"prec={si_precision:.3f} rec={si_recall:.3f} "
+          f"log_loss={si_log_loss:.4f}")
 
     # Learned DBN — with cross-time reverse pipeline blacklist applied
     # via build_dbn_model_2s which is called inside full_dynamic_bn_new_new_new
@@ -912,6 +1134,7 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins):
         persistence_acc, persistence_f1, persistence_precision, persistence_recall,
         ar_acc, ar_f1, ar_precision, ar_recall, ar_log_loss,
         sbn_acc, sbn_f1, sbn_precision, sbn_recall, sbn_log_loss,
+        si_acc, si_f1, si_precision, si_recall, si_log_loss,
         mb_size, mb_fallback,
         train_time_sec, eval_time_sec,
         all_tput_results,
@@ -969,6 +1192,8 @@ def main():
                                     ar_recall, ar_log_loss,
                                     sbn_acc, sbn_f1, sbn_precision,
                                     sbn_recall, sbn_log_loss,
+                                    si_acc, si_f1, si_precision,
+                                    si_recall, si_log_loss,
                                     mb_size, mb_fallback,
                                     train_time_sec, eval_time_sec,
                                     all_tput_results,
@@ -1000,12 +1225,18 @@ def main():
                                     "ar_dbn_precision":          ar_precision,
                                     "ar_dbn_recall":             ar_recall,
                                     "ar_dbn_log_loss":           ar_log_loss,
-                                    # Static BN baseline
+                                    # Static BN transition baseline
                                     "static_bn_accuracy":        sbn_acc,
                                     "static_bn_f1":              sbn_f1,
                                     "static_bn_precision":       sbn_precision,
                                     "static_bn_recall":          sbn_recall,
                                     "static_bn_log_loss":        sbn_log_loss,
+                                    # Static BN inference baseline (same-time, prior lab work)
+                                    "static_bn_si_accuracy":     si_acc,
+                                    "static_bn_si_f1":           si_f1,
+                                    "static_bn_si_precision":    si_precision,
+                                    "static_bn_si_recall":       si_recall,
+                                    "static_bn_si_log_loss":     si_log_loss,
                                     # Config
                                     "n_features_incl_target":    len(cols),
                                     "features":                  ",".join(cols),
@@ -1061,6 +1292,7 @@ def main():
                                     f"| pers_acc={persistence_acc:.3f} "
                                     f"| ar_acc={ar_acc:.3f} "
                                     f"| sbn_acc={sbn_acc:.3f} "
+                                    f"| si_acc={si_acc:.3f} "
                                     f"| delta_ar={res['accuracy']-ar_acc:.3f} "
                                     f"| delta_sbn={res['accuracy']-sbn_acc:.3f}"
                                     + (f" | mb_size={mb_size} mb_fb={mb_fallback}"
@@ -1099,6 +1331,11 @@ def main():
                                     "static_bn_precision":       np.nan,
                                     "static_bn_recall":          np.nan,
                                     "static_bn_log_loss":        np.nan,
+                                    "static_bn_si_accuracy":     np.nan,
+                                    "static_bn_si_f1":           np.nan,
+                                    "static_bn_si_precision":    np.nan,
+                                    "static_bn_si_recall":       np.nan,
+                                    "static_bn_si_log_loss":     np.nan,
                                     "n_features_incl_target":    np.nan,
                                     "features":                  None,
                                     "mb_size":                   None,
@@ -1143,6 +1380,7 @@ def main():
                     "accuracy", "f1", "precision", "recall", "log_loss",
                     "persistence_accuracy", "persistence_f1",
                     "ar_dbn_accuracy", "ar_dbn_f1", "ar_dbn_log_loss",
+                    "static_bn_si_accuracy", "static_bn_si_f1", "static_bn_si_log_loss",
                     "n_features_incl_target", "mb_size", "mb_fallback",
                     "train_time_sec", "eval_time_sec",
                 ]].to_string(index=False)
