@@ -60,7 +60,7 @@ FIXED_BOUNDARIES = {
 }
 SCORES                    = ["bic", "aic"]
 
-N_BINS_VALUES      = [2, 3, 4, 6, 8, 10]
+N_BINS_VALUES      = [10, 12, 14, 16, 18, 20]
 DBSCAN_EPS         = 0.30
 DBSCAN_MIN_SAMPLES = 10
 
