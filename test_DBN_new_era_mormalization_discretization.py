@@ -43,8 +43,7 @@ TARGETS    = ["throughput_3"]
 
 K_VALUES                  = [4, 8, 12, 16, 20]
 FEATURE_SELECTION_METHODS = ["markov", "mrmr"]
-DISCRETIZATION_METHODS    = ["classic_uniform", "classic_quantile", "kmeans", "fixed",
-                              "decision_tree", "gmm"]
+DISCRETIZATION_METHODS    = ["decision_tree", "gmm"]
 
 # Domain-driven boundaries based on natural modes observed in the throughput
 # distribution histograms. Boundaries sit at the valleys between modes:
@@ -234,7 +233,18 @@ class Discretizer:
                     self.kbins[c] = kbd
                 return
 
-            y = df[target_col].to_numpy(dtype=float)
+            y_cont = df[target_col].to_numpy(dtype=float)
+
+            # discretize the target into integer bin labels before passing
+            # to DecisionTreeClassifier — it expects discrete class labels,
+            # not continuous values. We use quantile binning to get
+            # balanced classes for the tree to split on.
+            kbd_target = KBinsDiscretizer(
+                n_bins=self.n_bins, encode="ordinal", strategy="quantile"
+            )
+            y = kbd_target.fit_transform(
+                y_cont.reshape(-1, 1)
+            ).astype(int).flatten()
 
             for c in self.columns_:
                 if c == target_col:
@@ -599,35 +609,6 @@ def select_markov_blanket(train_df, k, score_name, n_bins, disc_method):
     return mb, mb_size, "none"
 
 
-def _normalize(train_fs, test_fs):
-    """
-    Normalize all continuous feature columns to zero mean and unit variance.
-    The scaler is fitted on training data only and applied to both train
-    and test — no leakage. The target column (TARGET) is excluded because
-    it will be discretized separately by the Discretizer.
-
-    StandardScaler is used instead of MinMaxScaler because telemetry
-    features have heavy tails (high skew) — MinMaxScaler compresses
-    most values into a tiny range when outliers are present.
-    """
-    feature_cols = [c for c in train_fs.columns if c != TARGET]
-    if not feature_cols:
-        return train_fs, test_fs
-
-    scaler = StandardScaler()
-    train_fs = train_fs.copy()
-    test_fs  = test_fs.copy()
-
-    train_fs[feature_cols] = scaler.fit_transform(
-        train_fs[feature_cols].to_numpy(dtype=float)
-    )
-    test_fs[feature_cols] = scaler.transform(
-        test_fs[feature_cols].to_numpy(dtype=float)
-    )
-
-    return train_fs, test_fs
-
-
 def apply_feature_selection(train_raw, test_raw, fs_method, k,
                              score_name, n_bins, disc_method):
     fs_method = fs_method.lower().strip()
@@ -638,7 +619,6 @@ def apply_feature_selection(train_raw, test_raw, fs_method, k,
         keep        = list(dict.fromkeys(predictors + [TARGET] + always_keep))
         train_fs    = train_raw[keep].copy()
         test_fs     = test_raw[keep].copy()
-        train_fs, test_fs = _normalize(train_fs, test_fs)
         return train_fs, test_fs, None, None
 
     if fs_method == "markov":
@@ -650,7 +630,6 @@ def apply_feature_selection(train_raw, test_raw, fs_method, k,
         keep        = list(dict.fromkeys(predictors + [TARGET] + always_keep))
         train_fs    = train_raw[keep].copy()
         test_fs     = test_raw[keep].copy()
-        train_fs, test_fs = _normalize(train_fs, test_fs)
         return train_fs, test_fs, mb_size, mb_fallback
 
     if fs_method == "pca":
