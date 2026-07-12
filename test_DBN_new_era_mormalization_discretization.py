@@ -18,6 +18,147 @@ from pgmpy.inference import VariableElimination
 from pgmpy.estimators import HillClimbSearch, BayesianEstimator
 from pgmpy.models import BayesianNetwork
 from full_dynamic_bn_new_new_new import build_dbn_model_2s, make_score
+
+
+# ============================================================
+# MDLP (Minimum Description Length Principle) DISCRETIZATION
+# Fayyad & Irani (1993) — implemented from scratch because
+# the mdlp-discretization package does not build on Python 3.12
+#
+# How it works:
+#   1. Sort feature values
+#   2. Find the split point that maximises information gain
+#   3. Apply MDL stopping criterion — only split if the gain
+#      justifies the added model complexity
+#   4. Recursively split each partition until criterion fails
+#
+# Key advantage for imbalanced data: the MDL criterion naturally
+# stops creating bins when there is not enough data to justify
+# them — so it will not create 10 bins if the data only supports 3.
+# ============================================================
+
+def _class_entropy(y, k):
+    """Shannon entropy of class label array y with k classes."""
+    if len(y) == 0:
+        return 0.0
+    counts = np.bincount(y, minlength=k).astype(float)
+    probs  = counts / len(y)
+    probs  = probs[probs > 0]
+    return float(-np.sum(probs * np.log2(probs + 1e-12)))
+
+
+def _mdlp_best_split(x_sorted, y_sorted, k):
+    """
+    Find the best split point for sorted arrays x_sorted, y_sorted.
+    Returns (best_cut_value, best_information_gain).
+    """
+    n         = len(y_sorted)
+    total_ent = _class_entropy(y_sorted, k)
+    best_gain = -np.inf
+    best_cut  = None
+
+    for i in range(1, n):
+        # only consider splits between distinct values
+        if x_sorted[i] == x_sorted[i - 1]:
+            continue
+        left  = y_sorted[:i]
+        right = y_sorted[i:]
+        gain  = (total_ent
+                 - (len(left)  / n) * _class_entropy(left,  k)
+                 - (len(right) / n) * _class_entropy(right, k))
+        if gain > best_gain:
+            best_gain = gain
+            best_cut  = float((x_sorted[i - 1] + x_sorted[i]) / 2.0)
+
+    return best_cut, best_gain
+
+
+def _mdlp_stop(y, y_left, y_right, gain, k):
+    """
+    MDL stopping criterion (Fayyad & Irani 1993).
+    Returns True if we should STOP splitting (gain not worth it).
+    """
+    n  = len(y)
+    n1 = len(y_left)
+    n2 = len(y_right)
+
+    if n1 == 0 or n2 == 0:
+        return True
+
+    # number of distinct classes in each partition
+    k1 = int(np.unique(y_left).shape[0])
+    k2 = int(np.unique(y_right).shape[0])
+
+    ent   = _class_entropy(y,       k)
+    ent1  = _class_entropy(y_left,  k)
+    ent2  = _class_entropy(y_right, k)
+
+    # MDL cost of the split
+    delta = (np.log2(3**k - 2)
+             - (k * ent - k1 * ent1 - k2 * ent2))
+
+    threshold = (np.log2(n - 1) + delta) / n
+
+    return gain <= threshold
+
+
+def _mdlp_recursive(x_sorted, y_sorted, k, max_bins, cuts):
+    """
+    Recursively find MDLP cut points.
+    Stops when MDL criterion fails or max_bins reached.
+    """
+    if len(cuts) >= max_bins - 1:
+        return
+
+    cut, gain = _mdlp_best_split(x_sorted, y_sorted, k)
+
+    if cut is None:
+        return
+
+    split_idx = np.searchsorted(x_sorted, cut)
+    y_left    = y_sorted[:split_idx]
+    y_right   = y_sorted[split_idx:]
+
+    if _mdlp_stop(y_sorted, y_left, y_right, gain, k):
+        return
+
+    cuts.append(cut)
+
+    # recurse on each partition
+    _mdlp_recursive(x_sorted[:split_idx], y_left,  k, max_bins, cuts)
+    _mdlp_recursive(x_sorted[split_idx:], y_right, k, max_bins, cuts)
+
+
+def mdlp_cuts(x, y, max_bins=20):
+    """
+    Compute MDLP cut points for continuous feature x given target y.
+
+    x:        1D numpy array of continuous feature values
+    y:        1D numpy array of integer class labels
+    max_bins: upper limit on number of bins (safety cap)
+
+    Returns sorted list of cut point values.
+    If no meaningful cuts found, returns [] (everything in one bin).
+    """
+    # discretize y to integers if needed
+    y = np.asarray(y, dtype=int)
+    x = np.asarray(x, dtype=float)
+
+    # remove NaNs
+    valid = ~(np.isnan(x) | np.isnan(y.astype(float)))
+    x, y  = x[valid], y[valid]
+
+    if len(np.unique(x)) <= 1 or len(np.unique(y)) <= 1:
+        return []
+
+    sorted_idx = np.argsort(x)
+    x_sorted   = x[sorted_idx]
+    y_sorted   = y[sorted_idx]
+    k          = int(np.unique(y).shape[0])
+
+    cuts = []
+    _mdlp_recursive(x_sorted, y_sorted, k, max_bins, cuts)
+    return sorted(cuts)
 from pathlib import Path
 import argparse
 
@@ -43,7 +184,8 @@ TARGETS    = ["throughput_3"]
 
 K_VALUES                  = [4, 8, 12, 16, 20]
 FEATURE_SELECTION_METHODS = ["markov", "mrmr"]
-DISCRETIZATION_METHODS    = ["decision_tree", "gmm"]
+DISCRETIZATION_METHODS    = ["classic_uniform", "classic_quantile", "kmeans",
+                              "fixed", "decision_tree", "gmm", "mdlp"]
 
 # Domain-driven boundaries based on natural modes observed in the throughput
 # distribution histograms. Boundaries sit at the valleys between modes:
@@ -59,7 +201,7 @@ FIXED_BOUNDARIES = {
 }
 SCORES                    = ["bic", "aic"]
 
-N_BINS_VALUES      = [10, 12, 14, 16, 18, 20]
+N_BINS_VALUES      = [4, 6, 10]
 DBSCAN_EPS         = 0.30
 DBSCAN_MIN_SAMPLES = 10
 
@@ -204,9 +346,10 @@ class Discretizer:
 
         self.tree_cuts = {}
         self.gmm_cuts  = {}
+        self.mdlp_cuts = {}
 
         valid = {"classic_uniform", "classic_quantile", "kmeans",
-                 "dbscan", "fixed", "decision_tree", "gmm"}
+                 "dbscan", "fixed", "decision_tree", "gmm", "mdlp"}
         if self.method not in valid:
             raise ValueError(f"Unknown discretizer method: {self.method}")
 
@@ -316,6 +459,62 @@ class Discretizer:
                     self.kbins[c] = kbd
             return
 
+        if self.method == "mdlp":
+            # MDLP requires a discrete target to find cut points.
+            # We discretize the target with quantile binning first,
+            # then use those labels to find MDLP cuts for each feature.
+            # n_bins is used as the upper cap on number of bins — MDLP
+            # may produce fewer bins if the data does not justify more.
+            if target_col is None or target_col not in df.columns:
+                # fallback to quantile if no target available
+                for c in self.columns_:
+                    kbd = KBinsDiscretizer(
+                        n_bins=self.n_bins, encode="ordinal",
+                        strategy="quantile"
+                    )
+                    kbd.fit(df[[c]])
+                    self.kbins[c] = kbd
+                return
+
+            # discretize target for use as class labels in MDLP
+            y_cont = df[target_col].to_numpy(dtype=float)
+            kbd_target = KBinsDiscretizer(
+                n_bins=self.n_bins, encode="ordinal", strategy="quantile"
+            )
+            y_disc = kbd_target.fit_transform(
+                y_cont.reshape(-1, 1)
+            ).astype(int).flatten()
+
+            for c in self.columns_:
+                if c == target_col:
+                    # target gets quantile binning directly
+                    kbd = KBinsDiscretizer(
+                        n_bins=self.n_bins, encode="ordinal",
+                        strategy="quantile"
+                    )
+                    kbd.fit(df[[c]])
+                    self.kbins[c] = kbd
+                    continue
+
+                x = df[c].to_numpy(dtype=float)
+
+                if np.unique(x).shape[0] <= 1:
+                    self.mdlp_cuts[c] = []
+                    continue
+
+                try:
+                    cuts = mdlp_cuts(x, y_disc, max_bins=self.n_bins)
+                    self.mdlp_cuts[c] = cuts
+                except Exception:
+                    # fallback to quantile if MDLP fails
+                    kbd = KBinsDiscretizer(
+                        n_bins=self.n_bins, encode="ordinal",
+                        strategy="quantile"
+                    )
+                    kbd.fit(df[[c]])
+                    self.kbins[c] = kbd
+            return
+
         if self.method == "fixed":
             for c in self.columns_:
                 if c in self.fixed_boundaries:
@@ -399,6 +598,25 @@ class Discretizer:
                             bins=cuts
                         ).astype(int)
                 else:
+                    out[c] = self.kbins[c].transform(
+                        out[[c]]
+                    ).astype(int).flatten()
+            return out.astype(int)
+
+        if self.method == "mdlp":
+            for c in self.columns_:
+                if c in self.mdlp_cuts:
+                    cuts = self.mdlp_cuts[c]
+                    if len(cuts) == 0:
+                        # MDLP found no meaningful splits — everything bin 0
+                        out[c] = 0
+                    else:
+                        out[c] = np.digitize(
+                            out[c].to_numpy(dtype=float),
+                            bins=cuts
+                        ).astype(int)
+                else:
+                    # target or fallback columns use kbins
                     out[c] = self.kbins[c].transform(
                         out[[c]]
                     ).astype(int).flatten()
@@ -574,7 +792,7 @@ def select_markov_blanket(train_df, k, score_name, n_bins, disc_method):
     # for the quick Markov blanket pre-search, fall back to classic_uniform
     # for any supervised or special method to keep the pre-search fast
     quick_method = ("classic_uniform"
-                    if disc_method in {"dbscan", "fixed", "decision_tree", "gmm"}
+                    if disc_method in {"dbscan", "fixed", "decision_tree", "gmm", "mdlp"}
                     else disc_method)
     quick_disc   = Discretizer(
         method=quick_method, n_bins=n_bins,
@@ -609,6 +827,32 @@ def select_markov_blanket(train_df, k, score_name, n_bins, disc_method):
     return mb, mb_size, "none"
 
 
+def _normalize(train_fs, test_fs):
+    """
+    Normalize all continuous feature columns to zero mean and unit variance.
+    Fitted on training data only — no leakage into test.
+    Target column (TARGET) is excluded — it is discretized separately.
+
+    StandardScaler chosen over MinMaxScaler because telemetry features
+    have heavy tails and outliers (de Amorim et al. 2023).
+    """
+    feature_cols = [c for c in train_fs.columns if c != TARGET]
+    if not feature_cols:
+        return train_fs, test_fs
+
+    scaler   = StandardScaler()
+    train_fs = train_fs.copy()
+    test_fs  = test_fs.copy()
+
+    train_fs[feature_cols] = scaler.fit_transform(
+        train_fs[feature_cols].to_numpy(dtype=float)
+    )
+    test_fs[feature_cols] = scaler.transform(
+        test_fs[feature_cols].to_numpy(dtype=float)
+    )
+    return train_fs, test_fs
+
+
 def apply_feature_selection(train_raw, test_raw, fs_method, k,
                              score_name, n_bins, disc_method):
     fs_method = fs_method.lower().strip()
@@ -619,6 +863,7 @@ def apply_feature_selection(train_raw, test_raw, fs_method, k,
         keep        = list(dict.fromkeys(predictors + [TARGET] + always_keep))
         train_fs    = train_raw[keep].copy()
         test_fs     = test_raw[keep].copy()
+        train_fs, test_fs = _normalize(train_fs, test_fs)
         return train_fs, test_fs, None, None
 
     if fs_method == "markov":
@@ -630,6 +875,7 @@ def apply_feature_selection(train_raw, test_raw, fs_method, k,
         keep        = list(dict.fromkeys(predictors + [TARGET] + always_keep))
         train_fs    = train_raw[keep].copy()
         test_fs     = test_raw[keep].copy()
+        train_fs, test_fs = _normalize(train_fs, test_fs)
         return train_fs, test_fs, mb_size, mb_fallback
 
     if fs_method == "pca":
