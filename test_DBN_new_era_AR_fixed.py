@@ -17,7 +17,7 @@ from sklearn.metrics import f1_score, log_loss, precision_score, recall_score
 from pgmpy.inference import VariableElimination
 from pgmpy.estimators import HillClimbSearch, BayesianEstimator
 from pgmpy.models import BayesianNetwork
-from full_dynamic_bn_new_new_new import build_dbn_model_2s, make_score
+from full_dynamic_bn_new_new_new_new_self_loop import build_dbn_model_2s, make_score
 
 
 # ============================================================
@@ -1442,7 +1442,7 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins,
           f"log_loss={si_log_loss:.4f}")
 
     t_train_start = time.perf_counter()
-    model_2s, *_ = build_dbn_model_2s(train_ready, score_name=score_name)
+    model_2s, *_ = build_dbn_model_2s(train_ready, score_name=score_name, target=TARGET)
     t_train_end   = time.perf_counter()
 
     t_eval_start = time.perf_counter()
