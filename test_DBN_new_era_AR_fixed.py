@@ -17,7 +17,7 @@ from sklearn.metrics import f1_score, log_loss, precision_score, recall_score
 from pgmpy.inference import VariableElimination
 from pgmpy.estimators import HillClimbSearch, BayesianEstimator
 from pgmpy.models import BayesianNetwork
-from full_dynamic_bn_new_new_new_new_self_loop import build_dbn_model_2s, make_score
+from full_dynamic_bn_new_new_new_new_self_loop_counter import build_dbn_model_2s, make_score
 
 
 # ============================================================
@@ -194,6 +194,9 @@ DBSCAN_EPS         = 0.30
 DBSCAN_MIN_SAMPLES = 10
 
 MB_QUICK_MAX_ITER = 8000
+
+USE_DURATION = True     # set False to run without the counter, for comparison
+DURATION_MAX = 6        # durations of 6+ steps share one value
 
 # ============================================================
 # CHANGE 5 (evidence protocol fix — see evaluate() docstring below):
@@ -1375,6 +1378,23 @@ def static_bn_inference_baseline(train_ready, test_ready, score_name):
     return accuracy, f1, precision, recall, ll
 
 
+def add_duration_pair(train_df, test_df, target, max_dur=6):
+    full = pd.concat([train_df[[target]], test_df[[target]]], ignore_index=True)
+    x = full[target].to_numpy()
+    dur = np.ones(len(x), dtype=int)
+    for i in range(1, len(x)):
+        dur[i] = dur[i - 1] + 1 if x[i] == x[i - 1] else 1
+    dur = np.minimum(dur, max_dur) - 1          # values 0..max_dur-1
+
+    col = f"{target}_dur"
+    n = len(train_df)
+    tr, te = train_df.copy(), test_df.copy()
+    tr[col] = dur[:n]
+    te[col] = dur[n:]
+    # test can't contain a value that train never saw
+    te[col] = te[col].clip(upper=int(tr[col].max()))
+    return tr, te
+
 # ============================================================
 # ONE RUN
 # ============================================================
@@ -1441,12 +1461,19 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins,
           f"prec={si_precision:.3f} rec={si_recall:.3f} "
           f"log_loss={si_log_loss:.4f}")
 
+    if USE_DURATION:
+        train_dbn, test_dbn = add_duration_pair(train_ready, test_ready, TARGET, DURATION_MAX)
+        dur_col = f"{TARGET}_dur"
+    else:
+        train_dbn, test_dbn, dur_col = train_ready, test_ready, None
+
     t_train_start = time.perf_counter()
-    model_2s, *_ = build_dbn_model_2s(train_ready, score_name=score_name, target=TARGET)
+    model_2s, *_ = build_dbn_model_2s(train_dbn, score_name=score_name,
+                                      target=TARGET, duration_col=dur_col)
     t_train_end   = time.perf_counter()
 
     t_eval_start = time.perf_counter()
-    res          = evaluate(model_2s, test_ready)
+    res          = evaluate(model_2s, test_dbn)
     t_eval_end   = time.perf_counter()
 
     # ============================================================
@@ -1489,7 +1516,7 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins,
         t1_node = f"{eval_tgt}_t1"
         if t1_node in model_nodes and eval_tgt in test_ready.columns:
             try:
-                r = evaluate(model_2s, test_ready, target_override=eval_tgt)
+                r = evaluate(model_2s, test_dbn, target_override=eval_tgt)
                 all_tput_results[eval_tgt] = r
                 print(f"  [{eval_tgt}] acc={r['accuracy']:.3f} "
                       f"f1={r['f1']:.3f} prec={r['precision']:.3f} "
