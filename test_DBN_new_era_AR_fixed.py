@@ -197,6 +197,7 @@ MB_QUICK_MAX_ITER = 8000
 
 USE_DURATION = True     # set False to run without the counter, for comparison
 DURATION_MAX = 6        # durations of 6+ steps share one value
+TARGET_PARENTS_ONLY = True
 
 # ============================================================
 # CHANGE 5 (evidence protocol fix — see evaluate() docstring below):
@@ -1469,10 +1470,11 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins,
 
     t_train_start = time.perf_counter()
     model_2s, *_ = build_dbn_model_2s(train_dbn, score_name=score_name,
-                                      target=TARGET, duration_col=dur_col)
+                                      target=TARGET, duration_col=dur_col,
+                                      target_parents_only=TARGET_PARENTS_ONLY)
     t_train_end   = time.perf_counter()
     print("PARENTS of target_t1:", sorted(model_2s.get_parents(f"{TARGET}_t1")))
-    
+
     t_eval_start = time.perf_counter()
     res          = evaluate(model_2s, test_dbn)
     t_eval_end   = time.perf_counter()

@@ -389,6 +389,7 @@ def build_dbn_model_2s(
     score_name="bic",
     target=None,
     duration_col=None,
+    target_parents_only=False,
     max_indegree=MAX_INDEGREE,
     max_iter=HC_MAX_ITER,
     tabu_length=HC_TABU_LENGTH,
@@ -425,6 +426,15 @@ def build_dbn_model_2s(
         forced = (f"{duration_col}_t", f"{target}_t1")
         if forced not in inter:
             inter = inter + [forced]
+
+    # NEW: keep only the self-loop and the counter as parents of target_t1
+    if target_parents_only and target is not None:
+        keep = {f"{target}_t"}
+        if duration_col is not None:
+            keep.add(f"{duration_col}_t")
+        intra = [(u, v) for (u, v) in intra if v != target]
+        inter = [(u, v) for (u, v) in inter
+                 if v != f"{target}_t1" or u in keep]
 
     model_2s, edges = fit_consistent_2slice_bn(df_ready, intra, inter)
 
