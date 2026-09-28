@@ -1471,7 +1471,8 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins,
     model_2s, *_ = build_dbn_model_2s(train_dbn, score_name=score_name,
                                       target=TARGET, duration_col=dur_col)
     t_train_end   = time.perf_counter()
-
+    print("PARENTS of target_t1:", sorted(model_2s.get_parents(f"{TARGET}_t1")))
+    
     t_eval_start = time.perf_counter()
     res          = evaluate(model_2s, test_dbn)
     t_eval_end   = time.perf_counter()
