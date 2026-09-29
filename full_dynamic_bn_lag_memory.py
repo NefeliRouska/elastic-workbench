@@ -216,6 +216,7 @@ def build_inter_only_blacklist(nodes):
 def learn_inter_edges_only(
     df,
     score_name="bic",
+    horizon=1,
     max_indegree=MAX_INDEGREE,
     max_iter=HC_MAX_ITER,
     tabu_length=HC_TABU_LENGTH,
@@ -223,12 +224,14 @@ def learn_inter_edges_only(
     use_cache=HC_USE_CACHE,
 ):
     """
-    Learn inter-slice edges X_t -> Y_t1 from shifted two-slice data.
+    Learn inter-slice edges X_t -> Y_t1, where "t1" means t+horizon
+    rather than strictly the next row. horizon=1 reproduces the
+    original one-step-ahead behavior exactly.
     """
     nodes = list(df.columns)
 
-    df_t = df.iloc[:-1].reset_index(drop=True).add_suffix("_t")
-    df_t1 = df.iloc[1:].reset_index(drop=True).add_suffix("_t1")
+    df_t = df.iloc[:-horizon].reset_index(drop=True).add_suffix("_t")
+    df_t1 = df.iloc[horizon:].reset_index(drop=True).add_suffix("_t1")
     df_2s = pd.concat([df_t, df_t1], axis=1)
 
     blacklist = build_inter_only_blacklist(nodes)
@@ -263,7 +266,7 @@ def ensure_self_loops(columns, inter_edges, target=None):
     self-transition edge for the target variable entirely, leaving
     the model unable to reproduce even "predict the same as last
     step" for it. Confirmed reproducible on both this telemetry data
-    and separately on Sachs benchmark data (see CHANGES_TO_APPLY.md).
+    and separately on Sachs benchmark data.
 
     Scoped to target rather than every variable: forcing a self-loop
     adds a parent to that variable's _t1 CPD, which shrinks the
@@ -286,9 +289,9 @@ def ensure_self_loops(columns, inter_edges, target=None):
 # ============================================================
 # FIT 2-SLICE DBN
 # ============================================================
-def fit_consistent_2slice_bn(df, intra_edges, inter_edges):
+def fit_consistent_2slice_bn(df, intra_edges, inter_edges, horizon=1):
     """
-    Build and fit a two-slice DBN.
+    Build and fit a two-slice DBN, where "t1" means t+horizon.
 
     CPDs are fitted once from the full two-slice dataframe. We do NOT
     refit intra CPDs separately, because t1 nodes may have both
@@ -301,8 +304,8 @@ def fit_consistent_2slice_bn(df, intra_edges, inter_edges):
 
     edges_2s = intra_t + intra_t1 + inter_edges
 
-    df_t = df.iloc[:-1].reset_index(drop=True).add_suffix("_t")
-    df_t1 = df.iloc[1:].reset_index(drop=True).add_suffix("_t1")
+    df_t = df.iloc[:-horizon].reset_index(drop=True).add_suffix("_t")
+    df_t1 = df.iloc[horizon:].reset_index(drop=True).add_suffix("_t1")
     df_2s = pd.concat([df_t, df_t1], axis=1)
 
     model_2s = BayesianNetwork(edges_2s)
@@ -335,6 +338,7 @@ def build_dbn_model_2s(
     target=None,
     lag_cols=None,
     target_parents_only=True,
+    horizon=1,
     max_indegree=MAX_INDEGREE,
     max_iter=HC_MAX_ITER,
     tabu_length=HC_TABU_LENGTH,
@@ -345,22 +349,24 @@ def build_dbn_model_2s(
     lag_cols: list of column names already present in df_ready holding
     the target's own past values (e.g. ["throughput_3_lag1",
     "throughput_3_lag2"]). Each gets its own forced edge into
-    target_t1, exactly like the self-loop -- these columns hold real
-    history the model would otherwise have to be lucky to discover.
+    target_t1. These are lags relative to the CURRENT row (t), and
+    are unaffected by horizon -- horizon only changes how far forward
+    t1 points, not how far backward the lag columns look.
 
     target_parents_only: when True (the default), target_t1's parents
-    are restricted to exactly {target_t} plus lag_cols. This is what
-    keeps the model from also depending on OTHER variables' next-step
-    (_t1) values, which it cannot actually observe at prediction time
-    and which were found to dilute the lag/self-loop signal with
-    unnecessary marginalization.
+    are restricted to exactly {target_t} plus lag_cols. This keeps
+    the model from depending on OTHER variables' t1 (future) values,
+    which it cannot observe at prediction time and which were found
+    to dilute the lag/self-loop signal.
+
+    horizon: how many rows ahead "t1" points to. horizon=1 is the
+    original one-step-ahead model. horizon=3 builds and evaluates a
+    3-step-ahead forecaster instead.
     """
     lag_cols = list(lag_cols) if lag_cols else []
 
     # Lag columns are excluded from the general within-slice search.
-    # They only ever appear as forced parents of target_t1, below --
-    # letting the search freely attach them elsewhere would defeat the
-    # point of keeping target_t1's parent set small and clean.
+    # They only ever appear as forced parents of target_t1, below.
     intra_df = df_ready.drop(columns=lag_cols) if lag_cols else df_ready
 
     intra = learn_intra_edges(
@@ -376,6 +382,7 @@ def build_dbn_model_2s(
     inter = learn_inter_edges_only(
         df_ready,
         score_name=score_name,
+        horizon=horizon,
         max_indegree=max_indegree,
         max_iter=max_iter,
         tabu_length=tabu_length,
@@ -399,6 +406,6 @@ def build_dbn_model_2s(
         inter = [(u, v) for (u, v) in inter
                  if v != f"{target}_t1" or u in keep]
 
-    model_2s, edges = fit_consistent_2slice_bn(df_ready, intra, inter)
+    model_2s, edges = fit_consistent_2slice_bn(df_ready, intra, inter, horizon=horizon)
 
     return model_2s, edges, intra, inter

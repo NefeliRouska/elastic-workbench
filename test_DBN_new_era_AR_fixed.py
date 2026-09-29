@@ -153,19 +153,28 @@ DBSCAN_MIN_SAMPLES = 10
 MB_QUICK_MAX_ITER = 8000
 
 # ============================================================
-# MEMORY (lag) CONFIG
-# N_LAGS controls how many past steps of TARGET are given to the
-# model as extra evidence, in addition to its current value (the
-# self-loop). N_LAGS=2 means the model sees t-2, t-1 and t to predict
-# t+1. N_LAGS=0 means no lag columns at all -- the model reduces to
-# exactly the self-loop-only case (equivalent to AR-DBN), and is the
-# control run to compare lag depths against.
+# MEMORY (lag) + HORIZON CONFIG
+#
+# N_LAGS: how many past steps of TARGET are given to the model as
+# extra evidence, in addition to its current value (the self-loop).
+# N_LAGS=2 means the model sees t-2, t-1 and t as evidence. N_LAGS=0
+# means no lag columns at all -- the model reduces to exactly the
+# self-loop-only case (equivalent to AR-DBN), and is the control run
+# to compare lag depths against.
+#
 # TARGET_PARENTS_ONLY: keep target_t1's parents restricted to exactly
-# the self-loop and the lag columns (no other variables' _t1 values).
-# See build_dbn_model_2s docstring for why this matters.
+# the self-loop and the lag columns (no other variables' t1 values).
+#
+# HORIZON: how many rows ahead "t1" points to, for every model built
+# in this file (DBN, AR-DBN, and the persistence baseline). HORIZON=1
+# is the original one-step-ahead setup. HORIZON=3 builds and
+# evaluates a 3-step-ahead forecaster instead. Static BN SI is
+# deliberately NOT affected by HORIZON -- it was never a forecast to
+# begin with, it always compares same-moment values.
 # ============================================================
 N_LAGS = 2
 TARGET_PARENTS_ONLY = True
+HORIZON = 3
 
 # ============================================================
 # CHANGE 5 (evidence protocol fix — see evaluate() docstring below):
@@ -892,9 +901,15 @@ class BestPerBinsTracker:
 # ============================================================
 # BASELINES
 # ============================================================
-def persistence_baseline(test_ready):
-    y_prev = test_ready[TARGET].iloc[:-1].to_numpy()
-    y_true = test_ready[TARGET].iloc[1:].to_numpy()
+def persistence_baseline(test_ready, horizon=1):
+    """
+    Predict the value horizon steps ago as the value now. horizon=1
+    is "predict the same as last step" (the original behavior).
+    horizon>1 is "predict the same as horizon steps ago" -- the fair
+    comparison point for a horizon-step-ahead forecaster.
+    """
+    y_prev = test_ready[TARGET].iloc[:-horizon].to_numpy()
+    y_true = test_ready[TARGET].iloc[horizon:].to_numpy()
     acc       = float(np.mean(y_prev == y_true))
     f1        = float(f1_score(y_true, y_prev, average="macro", zero_division=0))
     precision = float(precision_score(y_true, y_prev, average="macro", zero_division=0))
@@ -905,7 +920,7 @@ def persistence_baseline(test_ready):
 # ============================================================
 # EVALUATION
 # ============================================================
-def evaluate(model_2s, test_df, target_override=None, evidence_mode=None):
+def evaluate(model_2s, test_df, target_override=None, evidence_mode=None, horizon=1):
     """
     Evaluate a DBN model on test data.
 
@@ -914,7 +929,12 @@ def evaluate(model_2s, test_df, target_override=None, evidence_mode=None):
 
     evidence_mode: falls back to the module-level EVIDENCE_MODE if not
     given. "full_with_target" (default) includes y_t as evidence when
-    predicting y_t+1. "full_no_target" (legacy/ablation only) hides it.
+    predicting y_t1. "full_no_target" (legacy/ablation only) hides it.
+
+    horizon: how many rows ahead the model's t1 node was trained to
+    represent. Must match whatever horizon build_dbn_model_2s used to
+    build model_2s, or the comparison against the true value at
+    t+horizon will be wrong.
     """
     eval_target = target_override if target_override is not None else TARGET
     mode        = evidence_mode if evidence_mode is not None else EVIDENCE_MODE
@@ -935,7 +955,7 @@ def evaluate(model_2s, test_df, target_override=None, evidence_mode=None):
     model_nodes = set(model_2s.nodes())
     valid_cols  = [c for c in ev_cols if f"{c}_t" in model_nodes]
 
-    n = len(test_df) - 1
+    n = len(test_df) - horizon
     if n <= 0:
         return {
             "accuracy":  float("nan"),
@@ -970,7 +990,7 @@ def evaluate(model_2s, test_df, target_override=None, evidence_mode=None):
     for t in range(n):
         evidence     = {f"{c}_t": int(test_df.iloc[t][c]) for c in valid_cols}
         evidence_key = tuple(sorted(evidence.items()))
-        true_next    = int(test_df.iloc[t + 1][eval_target])
+        true_next    = int(test_df.iloc[t + horizon][eval_target])
 
         if evidence_key in inference_cache:
             probs = inference_cache[evidence_key]
@@ -1037,12 +1057,12 @@ def evaluate(model_2s, test_df, target_override=None, evidence_mode=None):
 # ============================================================
 # AUTOREGRESSIVE DBN BASELINE
 # ============================================================
-def autoregressive_dbn_baseline(train_ready, test_ready):
+def autoregressive_dbn_baseline(train_ready, test_ready, horizon=1):
     nodes = list(train_ready.columns)
     edges = [(f"{v}_t", f"{v}_t1") for v in nodes]
 
-    df_t  = train_ready.iloc[:-1].reset_index(drop=True).add_suffix("_t")
-    df_t1 = train_ready.iloc[1:].reset_index(drop=True).add_suffix("_t1")
+    df_t  = train_ready.iloc[:-horizon].reset_index(drop=True).add_suffix("_t")
+    df_t1 = train_ready.iloc[horizon:].reset_index(drop=True).add_suffix("_t1")
     df_2s = pd.concat([df_t, df_t1], axis=1)
 
     model = BayesianNetwork(edges)
@@ -1066,13 +1086,18 @@ def autoregressive_dbn_baseline(train_ready, test_ready):
         state_names=state_names_2s,
     )
 
-    res = evaluate(model, test_ready)
+    # Uses the module-level EVIDENCE_MODE default ("full_with_target")
+    # since no evidence_mode is passed here.
+    res = evaluate(model, test_ready, horizon=horizon)
     return (res["accuracy"], res["f1"], res["precision"],
             res["recall"], res["log_loss"])
 
 
 # ============================================================
 # STATIC BN INFERENCE BASELINE
+# (deliberately unaffected by HORIZON -- this baseline uses
+#  same-timeslice evidence X_t -> TARGET_t, never a forecast to
+#  begin with, so a forecasting horizon has no meaning here.)
 # ============================================================
 def static_bn_inference_baseline(train_ready, test_ready, score_name):
     train_s = train_ready[[c for c in train_ready.columns
@@ -1199,8 +1224,7 @@ def add_lag_pair(train_df, test_df, target, n_lags):
     the target's discretized value that many steps before the current
     row. Computed across the train+test boundary (concatenated first,
     then split back) so the first rows of test correctly see the tail
-    of train -- exactly the same cross-boundary handling used for the
-    earlier duration counter.
+    of train.
 
     The first n_lags rows of train have no history to look back on and
     are dropped. Test never loses rows: its earliest rows draw their
@@ -1209,6 +1233,9 @@ def add_lag_pair(train_df, test_df, target, n_lags):
     n_lags=0 is a no-op: returns the inputs unchanged and an empty
     lag_cols list. This is the control case -- with no lag columns,
     build_dbn_model_2s reduces to exactly the self-loop-only model.
+
+    Unaffected by HORIZON: lag columns always look backward from the
+    current row, regardless of how far forward the model predicts.
     """
     if n_lags <= 0:
         return train_df.copy(), test_df.copy(), []
@@ -1231,14 +1258,9 @@ def add_lag_pair(train_df, test_df, target, n_lags):
         tr[col] = lagged[:n]
         te[col] = lagged[n:]
 
-    # Rows without enough history yet (only ever the first n_lags rows
-    # of train) are dropped -- there is nothing valid to put there.
     tr = tr.dropna(subset=lag_cols).reset_index(drop=True)
     tr[lag_cols] = tr[lag_cols].astype(int)
 
-    # Test is always fully populated (its earliest lag values come
-    # from the tail of train), but guard against a lag value that
-    # never appeared in train -- can happen in a very short fold.
     for col in lag_cols:
         te[col] = te[col].clip(upper=int(tr[col].max()))
     te[lag_cols] = te[lag_cols].astype(int)
@@ -1292,7 +1314,7 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins,
                                        if c not in other_thr]]
 
     (persistence_acc, persistence_f1,
-     persistence_precision, persistence_recall) = persistence_baseline(test_ready)
+     persistence_precision, persistence_recall) = persistence_baseline(test_ready, HORIZON)
 
     print("TRAIN_READY COLS:", train_ready.columns.tolist())
     print("TRAIN_READY LEN:", len(train_ready))
@@ -1300,7 +1322,7 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins,
           f"prec={persistence_precision:.3f} rec={persistence_recall:.3f}")
 
     (ar_acc, ar_f1, ar_precision,
-     ar_recall, ar_log_loss) = autoregressive_dbn_baseline(train_ready, test_ready)
+     ar_recall, ar_log_loss) = autoregressive_dbn_baseline(train_ready, test_ready, horizon=HORIZON)
     print(f"AR-DBN       acc={ar_acc:.3f} f1={ar_f1:.3f} "
           f"prec={ar_precision:.3f} rec={ar_recall:.3f} "
           f"log_loss={ar_log_loss:.4f}")
@@ -1317,16 +1339,17 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins,
     t_train_start = time.perf_counter()
     model_2s, *_ = build_dbn_model_2s(train_dbn, score_name=score_name,
                                       target=TARGET, lag_cols=lag_cols,
-                                      target_parents_only=TARGET_PARENTS_ONLY)
+                                      target_parents_only=TARGET_PARENTS_ONLY,
+                                      horizon=HORIZON)
     t_train_end   = time.perf_counter()
     print("PARENTS of target_t1:", sorted(model_2s.get_parents(f"{TARGET}_t1")))
 
     t_eval_start = time.perf_counter()
-    res          = evaluate(model_2s, test_dbn)
+    res          = evaluate(model_2s, test_dbn, horizon=HORIZON)
     t_eval_end   = time.perf_counter()
 
     res_legacy_evidence = evaluate(model_2s, test_ready,
-                                    evidence_mode="full_no_target")
+                                    evidence_mode="full_no_target", horizon=HORIZON)
 
     train_time_sec = t_train_end - t_train_start
     eval_time_sec  = t_eval_end  - t_eval_start
@@ -1347,7 +1370,7 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins,
         t1_node = f"{eval_tgt}_t1"
         if t1_node in model_nodes and eval_tgt in test_ready.columns:
             try:
-                r = evaluate(model_2s, test_dbn, target_override=eval_tgt)
+                r = evaluate(model_2s, test_dbn, target_override=eval_tgt, horizon=HORIZON)
                 all_tput_results[eval_tgt] = r
                 print(f"  [{eval_tgt}] acc={r['accuracy']:.3f} "
                       f"f1={r['f1']:.3f} prec={r['precision']:.3f} "
@@ -1642,6 +1665,7 @@ def main():
                                 "modeling_granularity_sec":  MODELING_GRANULARITY_SEC,
                                 "evidence_mode":              EVIDENCE_MODE,
                                 "n_lags":                     N_LAGS,
+                                "horizon":                    HORIZON,
                                 "error":                     error_str,
                                 "acc_tput1":  _mean_tput("throughput_1", "accuracy"),
                                 "acc_tput2":  _mean_tput("throughput_2", "accuracy"),
