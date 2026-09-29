@@ -17,28 +17,16 @@ from sklearn.metrics import f1_score, log_loss, precision_score, recall_score
 from pgmpy.inference import VariableElimination
 from pgmpy.estimators import HillClimbSearch, BayesianEstimator
 from pgmpy.models import BayesianNetwork
-from full_dynamic_bn_new_new_new_new_self_loop_counter import build_dbn_model_2s, make_score
+from full_dynamic_bn_lag_memory import build_dbn_model_2s, make_score
 
 
 # ============================================================
 # MDLP (Minimum Description Length Principle) DISCRETIZATION
 # Fayyad & Irani (1993) — implemented from scratch because
 # the mdlp-discretization package does not build on Python 3.12
-#
-# How it works:
-#   1. Sort feature values
-#   2. Find the split point that maximises information gain
-#   3. Apply MDL stopping criterion — only split if the gain
-#      justifies the added model complexity
-#   4. Recursively split each partition until criterion fails
-#
-# Key advantage for imbalanced data: the MDL criterion naturally
-# stops creating bins when there is not enough data to justify
-# them — so it will not create 10 bins if the data only supports 3.
 # ============================================================
 
 def _class_entropy(y, k):
-    """Shannon entropy of class label array y with k classes."""
     if len(y) == 0:
         return 0.0
     counts = np.bincount(y, minlength=k).astype(float)
@@ -48,17 +36,12 @@ def _class_entropy(y, k):
 
 
 def _mdlp_best_split(x_sorted, y_sorted, k):
-    """
-    Find the best split point for sorted arrays x_sorted, y_sorted.
-    Returns (best_cut_value, best_information_gain).
-    """
     n         = len(y_sorted)
     total_ent = _class_entropy(y_sorted, k)
     best_gain = -np.inf
     best_cut  = None
 
     for i in range(1, n):
-        # only consider splits between distinct values
         if x_sorted[i] == x_sorted[i - 1]:
             continue
         left  = y_sorted[:i]
@@ -74,10 +57,6 @@ def _mdlp_best_split(x_sorted, y_sorted, k):
 
 
 def _mdlp_stop(y, y_left, y_right, gain, k):
-    """
-    MDL stopping criterion (Fayyad & Irani 1993).
-    Returns True if we should STOP splitting (gain not worth it).
-    """
     n  = len(y)
     n1 = len(y_left)
     n2 = len(y_right)
@@ -85,7 +64,6 @@ def _mdlp_stop(y, y_left, y_right, gain, k):
     if n1 == 0 or n2 == 0:
         return True
 
-    # number of distinct classes in each partition
     k1 = int(np.unique(y_left).shape[0])
     k2 = int(np.unique(y_right).shape[0])
 
@@ -93,7 +71,6 @@ def _mdlp_stop(y, y_left, y_right, gain, k):
     ent1  = _class_entropy(y_left,  k)
     ent2  = _class_entropy(y_right, k)
 
-    # MDL cost of the split
     delta = (np.log2(3**k - 2)
              - (k * ent - k1 * ent1 - k2 * ent2))
 
@@ -103,10 +80,6 @@ def _mdlp_stop(y, y_left, y_right, gain, k):
 
 
 def _mdlp_recursive(x_sorted, y_sorted, k, max_bins, cuts):
-    """
-    Recursively find MDLP cut points.
-    Stops when MDL criterion fails or max_bins reached.
-    """
     if len(cuts) >= max_bins - 1:
         return
 
@@ -124,27 +97,14 @@ def _mdlp_recursive(x_sorted, y_sorted, k, max_bins, cuts):
 
     cuts.append(cut)
 
-    # recurse on each partition
     _mdlp_recursive(x_sorted[:split_idx], y_left,  k, max_bins, cuts)
     _mdlp_recursive(x_sorted[split_idx:], y_right, k, max_bins, cuts)
 
 
 def mdlp_cuts(x, y, max_bins=20):
-    """
-    Compute MDLP cut points for continuous feature x given target y.
-
-    x:        1D numpy array of continuous feature values
-    y:        1D numpy array of integer class labels
-    max_bins: upper limit on number of bins (safety cap)
-
-    Returns sorted list of cut point values.
-    If no meaningful cuts found, returns [] (everything in one bin).
-    """
-    # discretize y to integers if needed
     y = np.asarray(y, dtype=int)
     x = np.asarray(x, dtype=float)
 
-    # remove NaNs
     valid = ~(np.isnan(x) | np.isnan(y.astype(float)))
     x, y  = x[valid], y[valid]
 
@@ -175,9 +135,6 @@ def parse_args():
 args = parse_args()
 CSV_PATH = args.csv
 
-# K-fold cross-validation config
-# Expanding window: fold i trains on rows 0..split_i, tests on split_i..split_i+1
-# TRAIN_FRAC kept for backward compatibility but overridden when K_FOLDS > 1
 K_FOLDS    = 5
 TRAIN_FRAC = 0.8
 TARGETS    = ["throughput_3"]
@@ -195,21 +152,30 @@ DBSCAN_MIN_SAMPLES = 10
 
 MB_QUICK_MAX_ITER = 8000
 
-USE_DURATION = True     # set False to run without the counter, for comparison
-DURATION_MAX = 6        # durations of 6+ steps share one value
+# ============================================================
+# MEMORY (lag) CONFIG
+# N_LAGS controls how many past steps of TARGET are given to the
+# model as extra evidence, in addition to its current value (the
+# self-loop). N_LAGS=2 means the model sees t-2, t-1 and t to predict
+# t+1. N_LAGS=0 means no lag columns at all -- the model reduces to
+# exactly the self-loop-only case (equivalent to AR-DBN), and is the
+# control run to compare lag depths against.
+# TARGET_PARENTS_ONLY: keep target_t1's parents restricted to exactly
+# the self-loop and the lag columns (no other variables' _t1 values).
+# See build_dbn_model_2s docstring for why this matters.
+# ============================================================
+N_LAGS = 2
 TARGET_PARENTS_ONLY = True
 
 # ============================================================
 # CHANGE 5 (evidence protocol fix — see evaluate() docstring below):
 # "full_with_target" is now the default. Under the previous
 # "full_no_target" default, y_t was hidden from evidence when
-# predicting y_t+1. This looks like a reasonable precaution but is
-# wrong: y_t is genuinely observable at prediction time in a real
-# deployment, and hiding it cripples any model whose only informative
-# parent of y_t+1 is y_t (AR-DBN's self-transition edge is exactly
-# this), while also silently capping the main learned DBN whenever
-# structure learning selects a y_t -> y_t+1 edge — which is likely,
-# since autocorrelation is usually the strongest available signal.
+# predicting y_t+1. y_t is genuinely observable at prediction time in
+# a real deployment, and hiding it cripples any model whose only
+# informative parent of y_t+1 is y_t (AR-DBN's self-transition edge
+# is exactly this), while also silently capping the main learned DBN
+# whenever structure learning selects a y_t -> y_t+1 edge.
 # "full_no_target" is kept only as a legacy/ablation mode, used in
 # run_one() to quantify the effect of the original (bugged) protocol
 # for direct before/after reporting in the paper.
@@ -221,11 +187,6 @@ EXCLUDE_OTHER_THROUGHPUTS = False
 
 # ============================================================
 # CHANGE 1: variance threshold for dropping near-constant features
-# Features where almost all values are the same (e.g. process_open_fds
-# which had 99.9% of observations in one bin) carry no information and
-# only add noise to the structure search. We drop them before doing
-# anything else. 0.01 is a very low bar — only truly near-constant
-# columns get dropped.
 # ============================================================
 VARIANCE_THRESHOLD = 0.01
 
@@ -272,11 +233,6 @@ def load_and_clean(path, target):
     if target not in df.columns:
         raise ValueError(f"TARGET '{target}' not found after cleaning.")
 
-    # ============================================================
-    # CHANGE 1 APPLIED HERE: drop near-constant columns
-    # We always keep the target column regardless of its variance,
-    # then apply the threshold to everything else.
-    # ============================================================
     non_target_cols = [c for c in df.columns if c != target]
     if non_target_cols:
         selector = VarianceThreshold(threshold=VARIANCE_THRESHOLD)
@@ -302,21 +258,6 @@ def aggregate_to_modeling_granularity(df, every_n_seconds=MODELING_GRANULARITY_S
 # TEMPORAL K-FOLD SPLITS
 # ============================================================
 def make_temporal_folds(df, k=K_FOLDS):
-    """
-    Expanding-window temporal CV with k valid test folds.
-
-    Splits data into k+1 equally-sized blocks:
-      fold 1: train block 1,        test block 2
-      fold 2: train blocks 1-2,     test block 3
-      ...
-      fold k: train blocks 1-k,     test block k+1
-
-    This ensures every fold has a non-empty test set and the last
-    fold always uses all remaining data as test.
-    Any fold with fewer than 2 rows in train or test is skipped.
-
-    Returns list of (train_df, test_df) pairs.
-    """
     n          = len(df)
     boundaries = np.linspace(0, n, k + 2, dtype=int)
     folds      = []
@@ -356,19 +297,10 @@ class Discretizer:
             raise ValueError(f"Unknown discretizer method: {self.method}")
 
     def fit(self, df, target_col=None):
-        """
-        Fit the discretizer on df.
-        target_col: name of the target column in df. Required for
-                    method='decision_tree' (supervised binning).
-                    Ignored for all other methods.
-        """
         self.columns_ = list(df.columns)
 
         if self.method == "decision_tree":
-            # supervised: use target to find maximally predictive boundaries
-            # for each feature. Falls back to quantile if target unavailable.
             if target_col is None or target_col not in df.columns:
-                # fallback to quantile
                 for c in self.columns_:
                     kbd = KBinsDiscretizer(
                         n_bins=self.n_bins, encode="ordinal",
@@ -380,10 +312,6 @@ class Discretizer:
 
             y_cont = df[target_col].to_numpy(dtype=float)
 
-            # discretize the target into integer bin labels before passing
-            # to DecisionTreeClassifier — it expects discrete class labels,
-            # not continuous values. We use quantile binning to get
-            # balanced classes for the tree to split on.
             kbd_target = KBinsDiscretizer(
                 n_bins=self.n_bins, encode="ordinal", strategy="quantile"
             )
@@ -393,7 +321,6 @@ class Discretizer:
 
             for c in self.columns_:
                 if c == target_col:
-                    # discretize target with quantile (no self-prediction)
                     kbd = KBinsDiscretizer(
                         n_bins=self.n_bins, encode="ordinal",
                         strategy="quantile"
@@ -405,7 +332,6 @@ class Discretizer:
                 x = df[c].to_numpy(dtype=float).reshape(-1, 1)
 
                 if np.unique(x).shape[0] <= 1:
-                    # constant feature — store single cut at mean
                     self.tree_cuts[c] = []
                     continue
 
@@ -416,21 +342,16 @@ class Discretizer:
                 )
                 tree.fit(x, y)
 
-                # extract unique thresholds (sklearn uses -2 as sentinel
-                # for leaf nodes which have no threshold)
                 thresholds = tree.tree_.threshold
                 cuts = np.unique(thresholds[thresholds != -2])
                 self.tree_cuts[c] = sorted(cuts.tolist())
             return
 
         if self.method == "gmm":
-            # fit a Gaussian Mixture Model per feature; use midpoints
-            # between sorted component means as bin boundaries.
             for c in self.columns_:
                 x = df[c].to_numpy(dtype=float).reshape(-1, 1)
 
                 if np.unique(x).shape[0] <= self.n_bins:
-                    # too few unique values — fall back to quantile
                     kbd = KBinsDiscretizer(
                         n_bins=min(self.n_bins, np.unique(x).shape[0]),
                         encode="ordinal", strategy="quantile"
@@ -447,12 +368,10 @@ class Discretizer:
                     )
                     gm.fit(x)
                     means = np.sort(gm.means_.flatten())
-                    # midpoints between consecutive means = bin boundaries
                     cuts = [(means[i] + means[i+1]) / 2.0
                             for i in range(len(means) - 1)]
                     self.gmm_cuts[c] = cuts
                 except Exception:
-                    # fallback to quantile if GMM fails to converge
                     kbd = KBinsDiscretizer(
                         n_bins=self.n_bins, encode="ordinal",
                         strategy="quantile"
@@ -462,13 +381,7 @@ class Discretizer:
             return
 
         if self.method == "mdlp":
-            # MDLP requires a discrete target to find cut points.
-            # We discretize the target with quantile binning first,
-            # then use those labels to find MDLP cuts for each feature.
-            # n_bins is used as the upper cap on number of bins — MDLP
-            # may produce fewer bins if the data does not justify more.
             if target_col is None or target_col not in df.columns:
-                # fallback to quantile if no target available
                 for c in self.columns_:
                     kbd = KBinsDiscretizer(
                         n_bins=self.n_bins, encode="ordinal",
@@ -478,7 +391,6 @@ class Discretizer:
                     self.kbins[c] = kbd
                 return
 
-            # discretize target for use as class labels in MDLP
             y_cont = df[target_col].to_numpy(dtype=float)
             kbd_target = KBinsDiscretizer(
                 n_bins=self.n_bins, encode="ordinal", strategy="quantile"
@@ -489,7 +401,6 @@ class Discretizer:
 
             for c in self.columns_:
                 if c == target_col:
-                    # target gets quantile binning directly
                     kbd = KBinsDiscretizer(
                         n_bins=self.n_bins, encode="ordinal",
                         strategy="quantile"
@@ -508,7 +419,6 @@ class Discretizer:
                     cuts = mdlp_cuts(x, y_disc, max_bins=self.n_bins)
                     self.mdlp_cuts[c] = cuts
                 except Exception:
-                    # fallback to quantile if MDLP fails
                     kbd = KBinsDiscretizer(
                         n_bins=self.n_bins, encode="ordinal",
                         strategy="quantile"
@@ -531,7 +441,6 @@ class Discretizer:
                 self.kbins[c] = kbd
             return
 
-        # dbscan
         for c in self.columns_:
             x      = df[c].to_numpy(dtype=float).reshape(-1, 1)
             labels = DBSCAN(
@@ -566,7 +475,6 @@ class Discretizer:
                             bins=cuts
                         ).astype(int)
                 else:
-                    # target or fallback columns use kbins
                     out[c] = self.kbins[c].transform(
                         out[[c]]
                     ).astype(int).flatten()
@@ -594,7 +502,6 @@ class Discretizer:
                 if c in self.mdlp_cuts:
                     cuts = self.mdlp_cuts[c]
                     if len(cuts) == 0:
-                        # MDLP found no meaningful splits — everything bin 0
                         out[c] = 0
                     else:
                         out[c] = np.digitize(
@@ -602,7 +509,6 @@ class Discretizer:
                             bins=cuts
                         ).astype(int)
                 else:
-                    # target or fallback columns use kbins
                     out[c] = self.kbins[c].transform(
                         out[[c]]
                     ).astype(int).flatten()
@@ -613,7 +519,6 @@ class Discretizer:
                 out[c] = self.kbins[c].transform(out[[c]]).astype(int).flatten()
             return out.astype(int)
 
-        # dbscan
         for c in self.columns_:
             centers = self.dbscan_centers[c]
             x       = out[c].to_numpy(dtype=float).reshape(-1, 1)
@@ -723,15 +628,6 @@ def _build_blacklist_single_slice(df):
 
 
 def _build_blacklist_two_slice(train_ready):
-    """
-    Blacklist for the two-slice DBN structure (t -> t+1).
-    Prevents reverse pipeline edges across time slices:
-      throughput_3_t -> throughput_2_t1  (downstream cannot cause upstream)
-      throughput_3_t -> throughput_1_t1
-      throughput_2_t -> throughput_1_t1
-    These edges are statistically possible due to confounding but
-    causally implausible given the pipeline direction S1 -> S2 -> S3.
-    """
     nodes = list(train_ready.columns)
     black = []
 
@@ -760,8 +656,6 @@ def select_markov_blanket(train_df, k, score_name, n_bins, disc_method):
         if c == TARGET or filtered[c].nunique() > 1
     ]].copy()
 
-    # for the quick Markov blanket pre-search, fall back to classic_uniform
-    # for any supervised or special method to keep the pre-search fast
     quick_method = ("classic_uniform"
                     if disc_method in {"dbscan", "decision_tree", "gmm", "mdlp"}
                     else disc_method)
@@ -781,7 +675,7 @@ def select_markov_blanket(train_df, k, score_name, n_bins, disc_method):
     )
 
     mb_model = BayesianNetwork(best.edges())
-    mb_model.add_nodes_from(filtered.columns)  # ensure TARGET/isolated nodes exist even with zero edges
+    mb_model.add_nodes_from(filtered.columns)
     mb       = [c for c in mb_model.get_markov_blanket(TARGET) if c != TARGET]
     mb_size  = len(mb)
 
@@ -799,27 +693,6 @@ def select_markov_blanket(train_df, k, score_name, n_bins, disc_method):
 
 
 def _bulk_compression_frac(train_col_raw, train_col_scaled):
-    """
-    Lower = better (less compression of the real, non-outlier signal
-    toward zero after scaling). Only meaningful for scalers centered
-    near 0 (StandardScaler, RobustScaler) — MinMaxScaler is deliberately
-    excluded from the adaptive choice below: its output is bounded to
-    [0,1], but WHERE the bulk compresses depends on skew direction
-    (near 0 for right-skewed data, near 1 for left-skewed, near 0.5 only
-    for roughly symmetric data), so no single fixed threshold is valid
-    across all cases the way it is for the two centered scalers.
-
-    Trims BOTH tails (bottom 1% and top 1%) when identifying the "bulk"
-    of real, non-outlier values — outliers can be on either side of a
-    distribution, not just the high end, and a one-sided cutoff misses
-    negative-direction outliers entirely.
-
-    Note: this metric assumes roughly unimodal data. For genuinely
-    bimodal/multimodal columns, a low fraction here may just reflect a
-    natural gap between clusters rather than good resolution preservation
-    — verified during testing, not expected to affect typical telemetry
-    features but worth knowing if a column turns out to be bimodal.
-    """
     p1 = np.percentile(train_col_raw, 1)
     p99 = np.percentile(train_col_raw, 99)
     bulk_mask = (train_col_raw >= p1) & (train_col_raw <= p99)
@@ -828,24 +701,6 @@ def _bulk_compression_frac(train_col_raw, train_col_scaled):
 
 
 def _normalize(train_fs, test_fs):
-    """
-    Normalize all continuous feature columns. Fitted on training data
-    only — no leakage into test. Target column (TARGET) is excluded —
-    it is discretized separately.
-
-    Per-column ADAPTIVE scaler choice between StandardScaler and
-    RobustScaler: for each feature, both scalers are fit on train data
-    only, and whichever leaves less of the real (non-outlier) bulk of
-    values compressed near zero is used for that column. This replaces
-    a single hardcoded StandardScaler for all columns, based on finding
-    (validated on both synthetic data and the Sachs benchmark dataset)
-    that scaler suitability is column-dependent: some columns have
-    outliers severe enough that StandardScaler's std-based scale
-    collapses the real signal in the rest of the column, while others
-    are well-behaved and StandardScaler is fine (or even better than
-    RobustScaler) for them. See CHANGES_TO_APPLY.md item on normalization
-    for the full validation history.
-    """
     feature_cols = [c for c in train_fs.columns if c != TARGET]
     if not feature_cols:
         return train_fs, test_fs
@@ -954,22 +809,9 @@ def save_dbn_model(model_2s, target, k, fs_method, disc_method,
     return pkl_path, edges_path
 
 
-# ============================================================
-# CHANGE 2: BestPerBinsTracker now selects best model by F1
-# instead of accuracy.
-#
-# Previously the tracker kept the model with the highest accuracy.
-# Because throughput_3 is heavily imbalanced (85% of observations
-# in one bin), a model can get high accuracy just by always predicting
-# the majority bin — without actually learning anything useful.
-# F1 (macro) is a better criterion because it requires the model to
-# predict minority bins correctly too.
-# ============================================================
 class BestPerBinsTracker:
     """
     Saves the best model (by macro F1) for each distinct n_bins value.
-    Produces one saved model per bin count, allowing direct comparison
-    of causal structure and performance across discretization granularities.
     """
 
     def __init__(self, target):
@@ -979,7 +821,6 @@ class BestPerBinsTracker:
 
     def offer(self, f1, row_dict, model_2s,
               k, fs_method, disc_method, score_name, n_bins):
-        # CHANGE 2: parameter renamed from accuracy to f1
         if np.isnan(f1):
             return row_dict
 
@@ -1068,32 +909,12 @@ def evaluate(model_2s, test_df, target_override=None, evidence_mode=None):
     """
     Evaluate a DBN model on test data.
 
-    CHANGE 3: accepts an optional target_override parameter instead
-    of reading from the global TARGET variable. This replaces the
-    globals()["TARGET"] mutation that was used to evaluate S1/S2
-    throughputs on the same model. Mutating a global inside a function
-    is fragile — if an exception occurs, the global stays corrupted
-    for all subsequent configs in the sweep.
+    target_override: evaluate a different variable's t1 node than the
+    module-level TARGET, without mutating any global state.
 
-    CHANGE 5 (evidence protocol fix): accepts an optional evidence_mode
-    parameter. Falls back to the module-level EVIDENCE_MODE if not given.
-
-    "full_with_target" (the corrected default): y_t is included as
-    evidence when predicting y_t+1, exactly like any other variable.
-    This matters most for models whose only informative parent of
-    y_t+1 is y_t itself — e.g. AR-DBN, whose self-transition edge is
-    its ONLY edge. Excluding y_t leaves such a model with nothing to
-    condition on but its marginal distribution, which is not a fair
-    test of what the model can do. It also silently affected the main
-    learned DBN whenever structure learning selected a y_t -> y_t+1
-    inter-slice edge, which is plausible since autocorrelation is
-    typically the strongest available signal — so the fix may change
-    the main model's numbers too, not just AR-DBN's.
-
-    "full_no_target" (legacy/bugged mode — kept ONLY for the ablation
-    comparison in run_one(), never as the default): hides y_t from
-    evidence. Used to quantify, for the paper, exactly how much the
-    original evaluation protocol suppressed results.
+    evidence_mode: falls back to the module-level EVIDENCE_MODE if not
+    given. "full_with_target" (default) includes y_t as evidence when
+    predicting y_t+1. "full_no_target" (legacy/ablation only) hides it.
     """
     eval_target = target_override if target_override is not None else TARGET
     mode        = evidence_mode if evidence_mode is not None else EVIDENCE_MODE
@@ -1245,9 +1066,6 @@ def autoregressive_dbn_baseline(train_ready, test_ready):
         state_names=state_names_2s,
     )
 
-    # Uses the module-level EVIDENCE_MODE default ("full_with_target"
-    # after CHANGE 5) since no evidence_mode is passed here — this is
-    # the corrected, fair evaluation of AR-DBN.
     res = evaluate(model, test_ready)
     return (res["accuracy"], res["f1"], res["precision"],
             res["recall"], res["log_loss"])
@@ -1255,10 +1073,6 @@ def autoregressive_dbn_baseline(train_ready, test_ready):
 
 # ============================================================
 # STATIC BN INFERENCE BASELINE
-# (unaffected by CHANGE 5 — this baseline deliberately uses
-#  same-timeslice evidence X_t -> TARGET_t via its own inline
-#  inference loop, not the shared evaluate() function, so the
-#  evidence-mode fix does not apply and should not apply here.)
 # ============================================================
 def static_bn_inference_baseline(train_ready, test_ready, score_name):
     train_s = train_ready[[c for c in train_ready.columns
@@ -1379,22 +1193,58 @@ def static_bn_inference_baseline(train_ready, test_ready, score_name):
     return accuracy, f1, precision, recall, ll
 
 
-def add_duration_pair(train_df, test_df, target, max_dur=6):
+def add_lag_pair(train_df, test_df, target, n_lags):
+    """
+    Add columns {target}_lag1 .. {target}_lag{n_lags}, each holding
+    the target's discretized value that many steps before the current
+    row. Computed across the train+test boundary (concatenated first,
+    then split back) so the first rows of test correctly see the tail
+    of train -- exactly the same cross-boundary handling used for the
+    earlier duration counter.
+
+    The first n_lags rows of train have no history to look back on and
+    are dropped. Test never loses rows: its earliest rows draw their
+    lag values from the end of train.
+
+    n_lags=0 is a no-op: returns the inputs unchanged and an empty
+    lag_cols list. This is the control case -- with no lag columns,
+    build_dbn_model_2s reduces to exactly the self-loop-only model.
+    """
+    if n_lags <= 0:
+        return train_df.copy(), test_df.copy(), []
+
     full = pd.concat([train_df[[target]], test_df[[target]]], ignore_index=True)
     x = full[target].to_numpy()
-    dur = np.ones(len(x), dtype=int)
-    for i in range(1, len(x)):
-        dur[i] = dur[i - 1] + 1 if x[i] == x[i - 1] else 1
-    dur = np.minimum(dur, max_dur) - 1          # values 0..max_dur-1
-
-    col = f"{target}_dur"
     n = len(train_df)
+
     tr, te = train_df.copy(), test_df.copy()
-    tr[col] = dur[:n]
-    te[col] = dur[n:]
-    # test can't contain a value that train never saw
-    te[col] = te[col].clip(upper=int(tr[col].max()))
-    return tr, te
+    lag_cols = []
+
+    for L in range(1, n_lags + 1):
+        col = f"{target}_lag{L}"
+        lag_cols.append(col)
+
+        lagged = np.empty(len(x), dtype=float)
+        lagged[:L] = np.nan
+        lagged[L:] = x[:-L]
+
+        tr[col] = lagged[:n]
+        te[col] = lagged[n:]
+
+    # Rows without enough history yet (only ever the first n_lags rows
+    # of train) are dropped -- there is nothing valid to put there.
+    tr = tr.dropna(subset=lag_cols).reset_index(drop=True)
+    tr[lag_cols] = tr[lag_cols].astype(int)
+
+    # Test is always fully populated (its earliest lag values come
+    # from the tail of train), but guard against a lag value that
+    # never appeared in train -- can happen in a very short fold.
+    for col in lag_cols:
+        te[col] = te[col].clip(upper=int(tr[col].max()))
+    te[lag_cols] = te[lag_cols].astype(int)
+
+    return tr, te, lag_cols
+
 
 # ============================================================
 # ONE RUN
@@ -1421,7 +1271,6 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins,
         method=disc_method, n_bins=n_bins,
         dbscan_eps=DBSCAN_EPS, dbscan_min_samples=DBSCAN_MIN_SAMPLES,
     )
-    # pass target_col so decision_tree method can use supervised splits
     disc.fit(train_fs, target_col=TARGET)
     train_ready = disc.transform(train_fs)
     test_ready  = disc.transform(test_fs)
@@ -1462,15 +1311,12 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins,
           f"prec={si_precision:.3f} rec={si_recall:.3f} "
           f"log_loss={si_log_loss:.4f}")
 
-    if USE_DURATION:
-        train_dbn, test_dbn = add_duration_pair(train_ready, test_ready, TARGET, DURATION_MAX)
-        dur_col = f"{TARGET}_dur"
-    else:
-        train_dbn, test_dbn, dur_col = train_ready, test_ready, None
+    # ---- lag memory ----
+    train_dbn, test_dbn, lag_cols = add_lag_pair(train_ready, test_ready, TARGET, N_LAGS)
 
     t_train_start = time.perf_counter()
     model_2s, *_ = build_dbn_model_2s(train_dbn, score_name=score_name,
-                                      target=TARGET, duration_col=dur_col,
+                                      target=TARGET, lag_cols=lag_cols,
                                       target_parents_only=TARGET_PARENTS_ONLY)
     t_train_end   = time.perf_counter()
     print("PARENTS of target_t1:", sorted(model_2s.get_parents(f"{TARGET}_t1")))
@@ -1479,14 +1325,6 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins,
     res          = evaluate(model_2s, test_dbn)
     t_eval_end   = time.perf_counter()
 
-    # ============================================================
-    # CHANGE 5 (ablation): same trained model, same test data,
-    # evaluated under the OLD (bugged) evidence protocol that hides
-    # y_t. This lets the paper report exactly how much the original
-    # evaluation protocol suppressed the learned DBN's own numbers —
-    # not just AR-DBN's — rather than silently changing behaviour
-    # with no record of the delta this caused.
-    # ============================================================
     res_legacy_evidence = evaluate(model_2s, test_ready,
                                     evidence_mode="full_no_target")
 
@@ -1503,16 +1341,6 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins,
           f"f1={res_legacy_evidence['f1']:.3f} "
           f"log_loss={res_legacy_evidence['log_loss']:.4f}")
 
-    # ============================================================
-    # CHANGE 4: evaluate S1/S2/S3 throughputs using target_override
-    # instead of mutating the global TARGET variable.
-    #
-    # Previously the code did globals()["TARGET"] = eval_tgt inside
-    # this loop, which is a side effect — if an exception escaped the
-    # finally block, TARGET would be wrong for all subsequent configs.
-    # Now we pass the target explicitly to evaluate() via target_override,
-    # which is clean and safe.
-    # ============================================================
     all_tput_results = {}
     model_nodes = set(model_2s.nodes())
     for eval_tgt in ["throughput_1", "throughput_2", "throughput_3"]:
@@ -1588,10 +1416,6 @@ def main():
 
                             if disc == "dbscan" and n_bins != N_BINS_VALUES[0]:
                                 continue
-                            # decision_tree and gmm determine their own bin
-                            # count from the data — n_bins is still passed
-                            # as max_leaf_nodes / n_components so we DO sweep
-                            # it, no skip needed
 
                             print(
                                 f"[START] target={TARGET} K={k} "
@@ -1630,8 +1454,6 @@ def main():
                                         "precision":          res["precision"],
                                         "recall":             res["recall"],
                                         "log_loss":           res["log_loss"],
-                                        # CHANGE 5: legacy-evidence ablation
-                                        # metrics for the same trained model
                                         "legacy_accuracy":    res_legacy_evidence["accuracy"],
                                         "legacy_f1":          res_legacy_evidence["f1"],
                                         "legacy_precision":   res_legacy_evidence["precision"],
@@ -1734,13 +1556,6 @@ def main():
                                 default={}
                             )
 
-                            # ============================================================
-                            # CHANGE 4 CONTINUED: aggregate per-throughput results
-                            # across all folds instead of taking from best fold only.
-                            # Previously all_tput_results came from a single best fold,
-                            # making S1/S2 metrics non-comparable to the CV-averaged
-                            # main metrics. Now we average across all successful folds.
-                            # ============================================================
                             def _mean_tput(tgt, metric):
                                 vals = []
                                 for r in ok_folds:
@@ -1774,9 +1589,6 @@ def main():
                                 "recall_std":                _std("recall"),
                                 "log_loss":                  _mean("log_loss"),
                                 "log_loss_std":              _std("log_loss"),
-                                # CHANGE 5: DBN performance under the legacy
-                                # (bugged) evidence protocol, for the paper's
-                                # before/after ablation table
                                 "dbn_legacy_evidence_accuracy":      _mean("legacy_accuracy"),
                                 "dbn_legacy_evidence_accuracy_std":  _std("legacy_accuracy"),
                                 "dbn_legacy_evidence_f1":            _mean("legacy_f1"),
@@ -1829,8 +1641,8 @@ def main():
                                 "exclude_other_throughputs": EXCLUDE_OTHER_THROUGHPUTS,
                                 "modeling_granularity_sec":  MODELING_GRANULARITY_SEC,
                                 "evidence_mode":              EVIDENCE_MODE,
+                                "n_lags":                     N_LAGS,
                                 "error":                     error_str,
-                                # Per-throughput: CV-averaged across all folds
                                 "acc_tput1":  _mean_tput("throughput_1", "accuracy"),
                                 "acc_tput2":  _mean_tput("throughput_2", "accuracy"),
                                 "acc_tput3":  _mean_tput("throughput_3", "accuracy"),
@@ -1848,7 +1660,6 @@ def main():
                                 "ll_tput3":   _mean_tput("throughput_3", "log_loss"),
                             }
 
-                            # CHANGE 2: pass f1 to tracker instead of accuracy
                             if best_fold_model is not None and not np.isnan(_mean("f1")):
                                 row = tracker.offer(
                                     _mean("f1"), row, best_fold_model,
