@@ -172,7 +172,7 @@ MB_QUICK_MAX_ITER = 8000
 # deliberately NOT affected by HORIZON -- it was never a forecast to
 # begin with, it always compares same-moment values.
 # ============================================================
-N_LAGS = 2
+N_LAGS = 1
 TARGET_PARENTS_ONLY = True
 HORIZON = 3
 
