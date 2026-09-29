@@ -153,28 +153,36 @@ DBSCAN_MIN_SAMPLES = 10
 MB_QUICK_MAX_ITER = 8000
 
 # ============================================================
-# MEMORY (lag) + HORIZON CONFIG
+# MEMORY (lag) + CONTROL FLAG + HORIZON CONFIG
 #
-# N_LAGS: how many past steps of TARGET are given to the model as
-# extra evidence, in addition to its current value (the self-loop).
-# N_LAGS=2 means the model sees t-2, t-1 and t as evidence. N_LAGS=0
-# means no lag columns at all -- the model reduces to exactly the
-# self-loop-only case (equivalent to AR-DBN), and is the control run
-# to compare lag depths against.
+# N_LAGS: how many past steps of TARGET are given as extra evidence,
+# in addition to its current value (the self-loop). Confirmed via a
+# standalone Markov-order test (see markov_order_analysis.py) that
+# order 1 is the true optimum for throughput_3's own dynamics --
+# N_LAGS=2 was consistently worse across every bin count and horizon
+# tested. Default here is 1; change deliberately, not casually.
+#
+# USE_CONTROL_FLAG: adds one binary column -- "did any data_quality_*
+# variable change in the last step" -- as a forced parent of
+# target_t1, alongside the self-loop and lags. Confirmed via
+# control_variable_check.py: throughput_3 changes ~2.6x more often
+# right after a control action (20.2%) than baseline (7.6%), across
+# all six control columns tested. This is information persistence and
+# AR-DBN structurally cannot access, distinct from lag memory.
 #
 # TARGET_PARENTS_ONLY: keep target_t1's parents restricted to exactly
-# the self-loop and the lag columns (no other variables' t1 values).
+# the self-loop, the lag columns, and the control flag (no other
+# variables' t1 values).
 #
 # HORIZON: how many rows ahead "t1" points to, for every model built
 # in this file (DBN, AR-DBN, and the persistence baseline). HORIZON=1
-# is the original one-step-ahead setup. HORIZON=3 builds and
-# evaluates a 3-step-ahead forecaster instead. Static BN SI is
-# deliberately NOT affected by HORIZON -- it was never a forecast to
-# begin with, it always compares same-moment values.
+# is one-step-ahead. Static BN SI is deliberately NOT affected by
+# HORIZON -- it was never a forecast to begin with.
 # ============================================================
 N_LAGS = 1
+USE_CONTROL_FLAG = True
 TARGET_PARENTS_ONLY = True
-HORIZON = 3
+HORIZON = 1
 
 # ============================================================
 # CHANGE 5 (evidence protocol fix — see evaluate() docstring below):
@@ -902,12 +910,6 @@ class BestPerBinsTracker:
 # BASELINES
 # ============================================================
 def persistence_baseline(test_ready, horizon=1):
-    """
-    Predict the value horizon steps ago as the value now. horizon=1
-    is "predict the same as last step" (the original behavior).
-    horizon>1 is "predict the same as horizon steps ago" -- the fair
-    comparison point for a horizon-step-ahead forecaster.
-    """
     y_prev = test_ready[TARGET].iloc[:-horizon].to_numpy()
     y_true = test_ready[TARGET].iloc[horizon:].to_numpy()
     acc       = float(np.mean(y_prev == y_true))
@@ -924,17 +926,9 @@ def evaluate(model_2s, test_df, target_override=None, evidence_mode=None, horizo
     """
     Evaluate a DBN model on test data.
 
-    target_override: evaluate a different variable's t1 node than the
-    module-level TARGET, without mutating any global state.
-
-    evidence_mode: falls back to the module-level EVIDENCE_MODE if not
-    given. "full_with_target" (default) includes y_t as evidence when
-    predicting y_t1. "full_no_target" (legacy/ablation only) hides it.
-
     horizon: how many rows ahead the model's t1 node was trained to
     represent. Must match whatever horizon build_dbn_model_2s used to
-    build model_2s, or the comparison against the true value at
-    t+horizon will be wrong.
+    build model_2s.
     """
     eval_target = target_override if target_override is not None else TARGET
     mode        = evidence_mode if evidence_mode is not None else EVIDENCE_MODE
@@ -1086,8 +1080,6 @@ def autoregressive_dbn_baseline(train_ready, test_ready, horizon=1):
         state_names=state_names_2s,
     )
 
-    # Uses the module-level EVIDENCE_MODE default ("full_with_target")
-    # since no evidence_mode is passed here.
     res = evaluate(model, test_ready, horizon=horizon)
     return (res["accuracy"], res["f1"], res["precision"],
             res["recall"], res["log_loss"])
@@ -1222,20 +1214,10 @@ def add_lag_pair(train_df, test_df, target, n_lags):
     """
     Add columns {target}_lag1 .. {target}_lag{n_lags}, each holding
     the target's discretized value that many steps before the current
-    row. Computed across the train+test boundary (concatenated first,
-    then split back) so the first rows of test correctly see the tail
-    of train.
+    row. Computed across the train+test boundary so the first rows of
+    test correctly see the tail of train.
 
-    The first n_lags rows of train have no history to look back on and
-    are dropped. Test never loses rows: its earliest rows draw their
-    lag values from the end of train.
-
-    n_lags=0 is a no-op: returns the inputs unchanged and an empty
-    lag_cols list. This is the control case -- with no lag columns,
-    build_dbn_model_2s reduces to exactly the self-loop-only model.
-
-    Unaffected by HORIZON: lag columns always look backward from the
-    current row, regardless of how far forward the model predicts.
+    n_lags=0 is a no-op.
     """
     if n_lags <= 0:
         return train_df.copy(), test_df.copy(), []
@@ -1268,6 +1250,37 @@ def add_lag_pair(train_df, test_df, target, n_lags):
     return tr, te, lag_cols
 
 
+def compute_control_flag(train_raw, test_raw, control_prefixes=("data_quality_",)):
+    """
+    Returns (train_flag, test_flag, col_name) where train_flag/
+    test_flag are numpy int arrays aligned row-for-row with
+    train_raw/test_raw (same length, same order -- feature selection
+    and discretization never drop or reorder rows, only columns, so
+    these arrays can be assigned directly onto train_ready/test_ready
+    later). col_name is None if no matching columns exist in
+    train_raw, in which case the caller should skip using a control
+    flag for this fold/config.
+
+    Built from train_raw/test_raw (before feature selection), not
+    train_ready, because feature selection can drop data_quality_*
+    columns entirely in some folds/configs -- building from raw data
+    guarantees the flag is always available when the columns exist
+    in the source CSV at all.
+    """
+    control_cols = [c for c in train_raw.columns
+                    if c.lower().startswith(control_prefixes)]
+    if not control_cols:
+        return None, None, None
+
+    full = pd.concat([train_raw[control_cols], test_raw[control_cols]], ignore_index=True)
+    diffs = full.diff().abs().sum(axis=1)
+    flag = (diffs > 1e-9).astype(int).to_numpy()
+    flag[0] = 0  # no previous row to compare the very first row against
+
+    n = len(train_raw)
+    return flag[:n], flag[n:], "control_changed"
+
+
 # ============================================================
 # ONE RUN
 # ============================================================
@@ -1277,6 +1290,15 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins,
         split     = int(TRAIN_FRAC * len(raw_df))
         train_raw = raw_df.iloc[:split].reset_index(drop=True)
         test_raw  = raw_df.iloc[split:].reset_index(drop=True)
+
+    # Compute the control-change flag from RAW data now, before
+    # feature selection can drop the data_quality_* columns it needs.
+    if USE_CONTROL_FLAG:
+        train_flag_arr, test_flag_arr, control_col_name = compute_control_flag(
+            train_raw, test_raw
+        )
+    else:
+        train_flag_arr, test_flag_arr, control_col_name = None, None, None
 
     train_fs, test_fs, mb_size, mb_fallback = apply_feature_selection(
         train_raw, test_raw, fs_method, k, score_name, n_bins, disc_method
@@ -1333,12 +1355,30 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins,
           f"prec={si_precision:.3f} rec={si_recall:.3f} "
           f"log_loss={si_log_loss:.4f}")
 
+    # ---- attach control flag onto train_ready/test_ready (row counts
+    # and order match train_raw/test_raw exactly, since neither
+    # feature selection nor discretization drops or reorders rows) ----
+    train_dbn, test_dbn = train_ready.copy(), test_ready.copy()
+    if control_col_name is not None:
+        train_dbn[control_col_name] = train_flag_arr
+        test_dbn[control_col_name]  = test_flag_arr
+        # Guard: if a fold's train never saw a control change, the CPD
+        # has only one real state; clip test to the max state train saw,
+        # exactly like the lag-column clipping below, so evaluate()
+        # never queries a state the model was never fit on.
+        test_dbn[control_col_name] = test_dbn[control_col_name].clip(
+            upper=int(train_dbn[control_col_name].max())
+        )
+
     # ---- lag memory ----
-    train_dbn, test_dbn, lag_cols = add_lag_pair(train_ready, test_ready, TARGET, N_LAGS)
+    train_dbn, test_dbn, lag_cols = add_lag_pair(train_dbn, test_dbn, TARGET, N_LAGS)
+
+    control_col = control_col_name if control_col_name in train_dbn.columns else None
 
     t_train_start = time.perf_counter()
     model_2s, *_ = build_dbn_model_2s(train_dbn, score_name=score_name,
                                       target=TARGET, lag_cols=lag_cols,
+                                      control_col=control_col,
                                       target_parents_only=TARGET_PARENTS_ONLY,
                                       horizon=HORIZON)
     t_train_end   = time.perf_counter()
@@ -1665,6 +1705,7 @@ def main():
                                 "modeling_granularity_sec":  MODELING_GRANULARITY_SEC,
                                 "evidence_mode":              EVIDENCE_MODE,
                                 "n_lags":                     N_LAGS,
+                                "use_control_flag":           USE_CONTROL_FLAG,
                                 "horizon":                    HORIZON,
                                 "error":                     error_str,
                                 "acc_tput1":  _mean_tput("throughput_1", "accuracy"),

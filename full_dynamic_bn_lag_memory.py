@@ -337,6 +337,7 @@ def build_dbn_model_2s(
     score_name="bic",
     target=None,
     lag_cols=None,
+    control_col=None,
     target_parents_only=True,
     horizon=1,
     max_indegree=MAX_INDEGREE,
@@ -347,27 +348,34 @@ def build_dbn_model_2s(
 ):
     """
     lag_cols: list of column names already present in df_ready holding
-    the target's own past values (e.g. ["throughput_3_lag1",
-    "throughput_3_lag2"]). Each gets its own forced edge into
-    target_t1. These are lags relative to the CURRENT row (t), and
-    are unaffected by horizon -- horizon only changes how far forward
-    t1 points, not how far backward the lag columns look.
+    the target's own past values (e.g. ["throughput_3_lag1"]). Each
+    gets its own forced edge into target_t1. These are lags relative
+    to the CURRENT row (t), and are unaffected by horizon.
+
+    control_col: name of a single column already present in df_ready
+    holding a binary "did a control variable change last step" flag.
+    Gets its own forced edge into target_t1, same mechanism as
+    lag_cols -- this is information persistence and AR-DBN cannot see
+    (a deliberate system action just happened), distinct from lag_cols
+    (more history of the target's own past value).
 
     target_parents_only: when True (the default), target_t1's parents
-    are restricted to exactly {target_t} plus lag_cols. This keeps
-    the model from depending on OTHER variables' t1 (future) values,
-    which it cannot observe at prediction time and which were found
-    to dilute the lag/self-loop signal.
+    are restricted to exactly {target_t} plus lag_cols plus control_col.
+    This keeps the model from depending on OTHER variables' t1 (future)
+    values, which it cannot observe at prediction time and which were
+    found to dilute the signal.
 
     horizon: how many rows ahead "t1" points to. horizon=1 is the
-    original one-step-ahead model. horizon=3 builds and evaluates a
-    3-step-ahead forecaster instead.
+    original one-step-ahead model.
     """
     lag_cols = list(lag_cols) if lag_cols else []
+    exclude_cols = list(lag_cols)
+    if control_col is not None:
+        exclude_cols = exclude_cols + [control_col]
 
-    # Lag columns are excluded from the general within-slice search.
-    # They only ever appear as forced parents of target_t1, below.
-    intra_df = df_ready.drop(columns=lag_cols) if lag_cols else df_ready
+    # Lag/control columns are excluded from the general within-slice
+    # search. They only ever appear as forced parents of target_t1.
+    intra_df = df_ready.drop(columns=exclude_cols) if exclude_cols else df_ready
 
     intra = learn_intra_edges(
         intra_df,
@@ -392,16 +400,20 @@ def build_dbn_model_2s(
 
     inter = ensure_self_loops(df_ready.columns, inter, target=target)
 
-    # Force every lag column into target_t1's parents.
     if target is not None:
         for lag_col in lag_cols:
             forced = (f"{lag_col}_t", f"{target}_t1")
             if forced not in inter:
                 inter = inter + [forced]
+        if control_col is not None:
+            forced = (f"{control_col}_t", f"{target}_t1")
+            if forced not in inter:
+                inter = inter + [forced]
 
-    # Keep only the self-loop and the lag columns as parents of target_t1.
     if target_parents_only and target is not None:
         keep = {f"{target}_t"} | {f"{lag_col}_t" for lag_col in lag_cols}
+        if control_col is not None:
+            keep.add(f"{control_col}_t")
         intra = [(u, v) for (u, v) in intra if v != target]
         inter = [(u, v) for (u, v) in inter
                  if v != f"{target}_t1" or u in keep]
