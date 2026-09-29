@@ -1274,8 +1274,8 @@ def compute_control_flag(train_raw, test_raw, control_prefixes=("data_quality_",
 
     full = pd.concat([train_raw[control_cols], test_raw[control_cols]], ignore_index=True)
     diffs = full.diff().abs().sum(axis=1)
-    flag = (diffs > 1e-9).astype(int).to_numpy()
-    flag[0] = 0  # no previous row to compare the very first row against
+    flag = np.array((diffs > 1e-9).astype(int), dtype=int, copy=True)   # changed line
+    flag[0] = 0
 
     n = len(train_raw)
     return flag[:n], flag[n:], "control_changed"
