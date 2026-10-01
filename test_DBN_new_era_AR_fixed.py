@@ -153,26 +153,39 @@ DBSCAN_MIN_SAMPLES = 10
 MB_QUICK_MAX_ITER = 8000
 
 # ============================================================
-# MEMORY (lag) + CONTROL FLAG + HORIZON CONFIG
+# MEMORY (lag) + CONTROL FLAG + VELOCITY + HORIZON CONFIG
 #
 # N_LAGS: how many past steps of TARGET are given as extra evidence,
 # in addition to its current value (the self-loop). Confirmed via a
-# standalone Markov-order test (see markov_order_analysis.py) that
-# order 1 is the true optimum for throughput_3's own dynamics --
-# N_LAGS=2 was consistently worse across every bin count and horizon
-# tested. Default here is 1; change deliberately, not casually.
+# standalone Markov-order test that order 1 is the true optimum for
+# throughput_3's own dynamics -- N_LAGS=2 was consistently worse
+# across every bin count and horizon tested.
 #
 # USE_CONTROL_FLAG: adds one binary column -- "did any data_quality_*
 # variable change in the last step" -- as a forced parent of
-# target_t1, alongside the self-loop and lags. Confirmed via
-# control_variable_check.py: throughput_3 changes ~2.6x more often
-# right after a control action (20.2%) than baseline (7.6%), across
-# all six control columns tested. This is information persistence and
-# AR-DBN structurally cannot access, distinct from lag memory.
+# target_t1. Confirmed via control_variable_check.py: throughput_3
+# changes ~2.6x more often right after a control action than baseline.
+#
+# USE_VELOCITY_FEATURES: for every OTHER variable that feature
+# selection kept in train_ready (not the target itself), adds that
+# variable's lag1 value and a discretized velocity flag
+# (falling/flat/rising) as forced parents of target_t1, alongside
+# everything above.
+#
+# WARNING: this multiplies target_t1's parent count by roughly 2x
+# the number of feature-selected variables. At K=4 feature selection
+# typically keeps 2-4 other variables, so this can mean 7-11 total
+# parents -- well beyond anything previously tested (3-4 parents was
+# the largest config that worked; everything past that collapsed
+# under CPD table sparsity in every prior experiment in this
+# pipeline's history). This flag exists to test that hypothesis
+# directly and honestly, not because it's expected to help --
+# treat a negative or collapsed result here as informative, not as
+# a bug.
 #
 # TARGET_PARENTS_ONLY: keep target_t1's parents restricted to exactly
-# the self-loop, the lag columns, and the control flag (no other
-# variables' t1 values).
+# the self-loop, the lag columns, the control flag, and (if enabled)
+# the velocity columns -- no other variables' t1 values.
 #
 # HORIZON: how many rows ahead "t1" points to, for every model built
 # in this file (DBN, AR-DBN, and the persistence baseline). HORIZON=1
@@ -181,6 +194,7 @@ MB_QUICK_MAX_ITER = 8000
 # ============================================================
 N_LAGS = 1
 USE_CONTROL_FLAG = True
+USE_VELOCITY_FEATURES = True
 TARGET_PARENTS_ONLY = True
 HORIZON = 1
 
@@ -923,13 +937,6 @@ def persistence_baseline(test_ready, horizon=1):
 # EVALUATION
 # ============================================================
 def evaluate(model_2s, test_df, target_override=None, evidence_mode=None, horizon=1):
-    """
-    Evaluate a DBN model on test data.
-
-    horizon: how many rows ahead the model's t1 node was trained to
-    represent. Must match whatever horizon build_dbn_model_2s used to
-    build model_2s.
-    """
     eval_target = target_override if target_override is not None else TARGET
     mode        = evidence_mode if evidence_mode is not None else EVIDENCE_MODE
 
@@ -1087,9 +1094,6 @@ def autoregressive_dbn_baseline(train_ready, test_ready, horizon=1):
 
 # ============================================================
 # STATIC BN INFERENCE BASELINE
-# (deliberately unaffected by HORIZON -- this baseline uses
-#  same-timeslice evidence X_t -> TARGET_t, never a forecast to
-#  begin with, so a forecasting horizon has no meaning here.)
 # ============================================================
 def static_bn_inference_baseline(train_ready, test_ready, score_name):
     train_s = train_ready[[c for c in train_ready.columns
@@ -1212,12 +1216,8 @@ def static_bn_inference_baseline(train_ready, test_ready, score_name):
 
 def add_lag_pair(train_df, test_df, target, n_lags):
     """
-    Add columns {target}_lag1 .. {target}_lag{n_lags}, each holding
-    the target's discretized value that many steps before the current
-    row. Computed across the train+test boundary so the first rows of
-    test correctly see the tail of train.
-
-    n_lags=0 is a no-op.
+    Add columns {target}_lag1 .. {target}_lag{n_lags}. n_lags=0 is a
+    no-op.
     """
     if n_lags <= 0:
         return train_df.copy(), test_df.copy(), []
@@ -1252,20 +1252,8 @@ def add_lag_pair(train_df, test_df, target, n_lags):
 
 def compute_control_flag(train_raw, test_raw, control_prefixes=("data_quality_",)):
     """
-    Returns (train_flag, test_flag, col_name) where train_flag/
-    test_flag are numpy int arrays aligned row-for-row with
-    train_raw/test_raw (same length, same order -- feature selection
-    and discretization never drop or reorder rows, only columns, so
-    these arrays can be assigned directly onto train_ready/test_ready
-    later). col_name is None if no matching columns exist in
-    train_raw, in which case the caller should skip using a control
-    flag for this fold/config.
-
-    Built from train_raw/test_raw (before feature selection), not
-    train_ready, because feature selection can drop data_quality_*
-    columns entirely in some folds/configs -- building from raw data
-    guarantees the flag is always available when the columns exist
-    in the source CSV at all.
+    Returns (train_flag, test_flag, col_name). None, None, None if no
+    matching raw columns exist.
     """
     control_cols = [c for c in train_raw.columns
                     if c.lower().startswith(control_prefixes)]
@@ -1274,11 +1262,67 @@ def compute_control_flag(train_raw, test_raw, control_prefixes=("data_quality_",
 
     full = pd.concat([train_raw[control_cols], test_raw[control_cols]], ignore_index=True)
     diffs = full.diff().abs().sum(axis=1)
-    flag = np.array((diffs > 1e-9).astype(int), dtype=int, copy=True)   # changed line
+    flag = np.array((diffs > 1e-9).astype(int), dtype=int, copy=True)
     flag[0] = 0
 
     n = len(train_raw)
     return flag[:n], flag[n:], "control_changed"
+
+
+def add_velocity_features(train_df, test_df, variables, lags=1):
+    """
+    For each variable in `variables` (expected: the OTHER
+    feature-selected columns in train_df, not the target and not
+    control_changed), adds:
+      {var}_lag1 .. {var}_lag{lags}  (raw past discretized values)
+      {var}_vel1 .. {var}_vel{lags}  (discretized velocity:
+                                       0=falling, 1=flat, 2=rising)
+
+    WARNING: this doubles the column count per variable passed in.
+    Table-size cost grows multiplicatively with every column added
+    here if the caller then forces all of them in as parents of
+    target_t1 -- see the USE_VELOCITY_FEATURES docstring in the
+    config section for the expected scale of this.
+
+    Returns (train_out, test_out, new_cols).
+    """
+    variables = [v for v in variables if v in train_df.columns]
+    if not variables:
+        return train_df.copy(), test_df.copy(), []
+
+    full = pd.concat([train_df[variables], test_df[variables]], ignore_index=True)
+    n = len(train_df)
+    tr, te = train_df.copy(), test_df.copy()
+    new_cols = []
+
+    for var in variables:
+        x = full[var].to_numpy(dtype=float)
+        for L in range(1, lags + 1):
+            lag_col = f"{var}_lag{L}"
+            lagged = np.empty(len(x), dtype=float)
+            lagged[:L] = np.nan
+            lagged[L:] = x[:-L]
+
+            vel_col = f"{var}_vel{L}"
+            vel_raw = np.empty(len(x), dtype=float)
+            vel_raw[:L] = np.nan
+            vel_raw[L:] = x[L:] - x[:-L]
+            vel_disc = np.where(vel_raw > 0, 2, np.where(vel_raw < 0, 0, 1)).astype(float)
+            vel_disc[:L] = np.nan
+
+            tr[lag_col] = lagged[:n]
+            te[lag_col] = lagged[n:]
+            tr[vel_col] = vel_disc[:n]
+            te[vel_col] = vel_disc[n:]
+            new_cols += [lag_col, vel_col]
+
+    tr = tr.dropna(subset=new_cols).reset_index(drop=True)
+    tr[new_cols] = tr[new_cols].astype(int)
+    for c in new_cols:
+        te[c] = te[c].clip(upper=int(tr[c].max()))
+    te[new_cols] = te[new_cols].astype(int)
+
+    return tr, te, new_cols
 
 
 # ============================================================
@@ -1291,8 +1335,6 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins,
         train_raw = raw_df.iloc[:split].reset_index(drop=True)
         test_raw  = raw_df.iloc[split:].reset_index(drop=True)
 
-    # Compute the control-change flag from RAW data now, before
-    # feature selection can drop the data_quality_* columns it needs.
     if USE_CONTROL_FLAG:
         train_flag_arr, test_flag_arr, control_col_name = compute_control_flag(
             train_raw, test_raw
@@ -1355,34 +1397,39 @@ def run_one(raw_df, fs_method, disc_method, score_name, k, n_bins,
           f"prec={si_precision:.3f} rec={si_recall:.3f} "
           f"log_loss={si_log_loss:.4f}")
 
-    # ---- attach control flag onto train_ready/test_ready (row counts
-    # and order match train_raw/test_raw exactly, since neither
-    # feature selection nor discretization drops or reorders rows) ----
+    # ---- control flag ----
     train_dbn, test_dbn = train_ready.copy(), test_ready.copy()
     if control_col_name is not None:
         train_dbn[control_col_name] = train_flag_arr
         test_dbn[control_col_name]  = test_flag_arr
-        # Guard: if a fold's train never saw a control change, the CPD
-        # has only one real state; clip test to the max state train saw,
-        # exactly like the lag-column clipping below, so evaluate()
-        # never queries a state the model was never fit on.
         test_dbn[control_col_name] = test_dbn[control_col_name].clip(
             upper=int(train_dbn[control_col_name].max())
         )
 
-    # ---- lag memory ----
-    train_dbn, test_dbn, lag_cols = add_lag_pair(train_dbn, test_dbn, TARGET, N_LAGS)
+    # ---- target's own lag memory ----
+    train_dbn, test_dbn, target_lag_cols = add_lag_pair(train_dbn, test_dbn, TARGET, N_LAGS)
 
-    control_col = control_col_name if control_col_name in train_dbn.columns else None
+    # ---- velocity features for OTHER feature-selected variables ----
+    velocity_cols = []
+    if USE_VELOCITY_FEATURES:
+        other_vars = [c for c in train_ready.columns
+                      if c != TARGET]
+        train_dbn, test_dbn, velocity_cols = add_velocity_features(
+            train_dbn, test_dbn, other_vars, lags=1
+        )
+
+    all_lag_cols = target_lag_cols + velocity_cols
+    control_col = control_col_name if (control_col_name in train_dbn.columns) else None
 
     t_train_start = time.perf_counter()
     model_2s, *_ = build_dbn_model_2s(train_dbn, score_name=score_name,
-                                      target=TARGET, lag_cols=lag_cols,
+                                      target=TARGET, lag_cols=all_lag_cols,
                                       control_col=control_col,
                                       target_parents_only=TARGET_PARENTS_ONLY,
                                       horizon=HORIZON)
     t_train_end   = time.perf_counter()
     print("PARENTS of target_t1:", sorted(model_2s.get_parents(f"{TARGET}_t1")))
+    print(f"TOTAL PARENTS COUNT: {len(model_2s.get_parents(f'{TARGET}_t1'))}")
 
     t_eval_start = time.perf_counter()
     res          = evaluate(model_2s, test_dbn, horizon=HORIZON)
@@ -1706,6 +1753,7 @@ def main():
                                 "evidence_mode":              EVIDENCE_MODE,
                                 "n_lags":                     N_LAGS,
                                 "use_control_flag":           USE_CONTROL_FLAG,
+                                "use_velocity_features":      USE_VELOCITY_FEATURES,
                                 "horizon":                    HORIZON,
                                 "error":                     error_str,
                                 "acc_tput1":  _mean_tput("throughput_1", "accuracy"),
